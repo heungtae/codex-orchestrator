@@ -1,0 +1,15 @@
+# Node
+node_modules/
+
+# Build artifacts
+**/dist/
+
+# Runtime state
+.state/
+apps/orchestrator/.state/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
