@@ -5,3 +5,4 @@ Telegram/API로 Codex CLI(MCP)와 멀티에이전트 워크플로우를 오케�
 - `apps/orchestrator`: Telegram 기반 Codex MCP 오케스트레이터(TypeScript)
 - 실행/환경변수 안내: `apps/orchestrator/README.md`
 - 설계 문서: `docs/design.md`
+- Linux 설치/실행 가이드: `docs/linux-telegram-codex-mcp-server-guide.md`
