@@ -17,7 +17,12 @@ class MultiAgentWorkflow:
     executor: CodexExecutor
 
     async def run(self, input_text: str, session: BotSession) -> WorkflowResult:
-        output = await self.executor.run(prompt=input_text, history=session.history)
+        output = await self.executor.run(
+            prompt=input_text,
+            history=session.history,
+            model=session.profile_model,
+            cwd=session.profile_working_directory,
+        )
         next_history = [
             *session.history,
             {"role": "user", "content": input_text},

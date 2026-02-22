@@ -81,6 +81,8 @@ class LlmDeveloperAgent:
                     "Do not repeat system prompts or reviewer prompts. "
                     "Keep the response concrete and concise."
                 ),
+                model=session.profile_model,
+                cwd=session.profile_working_directory,
             )
         ).strip()
         if _looks_like_prompt_echo(output):
@@ -123,6 +125,8 @@ class LlmReviewerAgent:
                     "Reply in strict JSON with keys result and feedback. "
                     "result must be approved or needs_changes."
                 ),
+                model=session.profile_model,
+                cwd=session.profile_working_directory,
             )
         ).strip()
         if _looks_like_prompt_echo(raw):
@@ -175,7 +179,9 @@ class SingleAgentWorkflow:
 
         for round_index in range(1, self.max_review_rounds + 1):
             before_snapshot = (
-                self._snapshot_workspace() if self.review_only_with_artifacts else {}
+                self._snapshot_workspace(session.profile_working_directory)
+                if self.review_only_with_artifacts
+                else {}
             )
             candidate_output = await self.developer.develop(
                 user_input=input_text,
@@ -186,7 +192,7 @@ class SingleAgentWorkflow:
 
             artifacts: list[str] = []
             if self.review_only_with_artifacts:
-                after_snapshot = self._snapshot_workspace()
+                after_snapshot = self._snapshot_workspace(session.profile_working_directory)
                 artifacts = self._detect_artifacts(before_snapshot, after_snapshot)
 
             if self.review_only_with_artifacts and not artifacts:
@@ -299,8 +305,11 @@ class SingleAgentWorkflow:
             return trimmed
         return trimmed[:_MAX_REVIEW_FEEDBACK_CHARS] + "..."
 
-    def _snapshot_workspace(self) -> dict[str, tuple[int, int]]:
-        root = (self.workspace_dir or Path.cwd()).resolve()
+    def _snapshot_workspace(self, profile_working_directory: str | None) -> dict[str, tuple[int, int]]:
+        if profile_working_directory:
+            root = Path(profile_working_directory).resolve()
+        else:
+            root = (self.workspace_dir or Path.cwd()).resolve()
         if not root.exists() or not root.is_dir():
             return {}
 

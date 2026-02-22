@@ -19,6 +19,7 @@ class CodexExecutor(Protocol):
         *,
         system_instructions: str | None = None,
         model: str | None = None,
+        cwd: str | None = None,
     ) -> str:
         ...
 
@@ -53,6 +54,7 @@ class CodexMcpExecutor:
         *,
         system_instructions: str | None = None,
         model: str | None = None,
+        cwd: str | None = None,
     ) -> str:
         await self._ensure_started()
 
@@ -64,7 +66,7 @@ class CodexMcpExecutor:
             "prompt": final_prompt,
             "approval-policy": self.approval_policy,
             "sandbox": self.sandbox,
-            "cwd": self.cwd or os.getcwd(),
+            "cwd": cwd or self.cwd or os.getcwd(),
         }
 
         selected_model = model or self.default_model
@@ -77,6 +79,7 @@ class CodexMcpExecutor:
         try:
             result = await self._session.call_tool("codex", payload)
         except Exception as exc:
+            await self._reset_after_transport_error(str(exc))
             raise CodexExecutionError(f"failed to call mcp tool 'codex': {exc}") from exc
 
         output_text, is_error = self._extract_call_result(result)
@@ -91,6 +94,19 @@ class CodexMcpExecutor:
     async def warmup(self) -> None:
         """Eagerly start MCP stdio transport and initialize the session."""
         await self._ensure_started()
+
+    async def _reset_after_transport_error(self, error_message: str) -> None:
+        # If the transport/session has broken, force a fresh connection on next run.
+        try:
+            await self.close()
+        except Exception:
+            pass
+        finally:
+            self._session = None
+            self._session_cm = None
+            self._stdio_cm = None
+            self._started = False
+            self._set_status(stopped=True, error=error_message)
 
     async def close(self) -> None:
         async with self._startup_lock:
@@ -256,5 +272,6 @@ class EchoCodexExecutor:
         *,
         system_instructions: str | None = None,
         model: str | None = None,
+        cwd: str | None = None,
     ) -> str:
         return prompt

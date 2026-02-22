@@ -33,7 +33,7 @@
 
 ### `src/core/command_router.py`
 - 명령 파싱:
-  - Bot 예약 명령: `/mode single`, `/mode multi`, `/new`, `/status`
+  - Bot 예약 명령: `/mode single`, `/mode multi`, `/new`, `/status`, `/profile ...`
   - Codex 슬래시 명령: `/...` (예약 명령 제외 시 그대로 Codex로 전달)
   - 일반 텍스트(기본 경로: Codex로 즉시 전달)
 - 라우팅 우선순위:
@@ -107,8 +107,10 @@
 - `/mode multi`: 다중 에이전트 모드 전환
 - `/new`: 해당 세션 대화/상태 초기화
 - `/status`: 현재 모드/최근 실행 상태 + Codex MCP 상태 출력
+- `/profile list`: 사용 가능한 profile 목록 출력
+- `/profile <name>`: 실행 profile 전환(`model`, `working_directory`)
 - `텍스트`: 현재 모드의 워크플로우로 실행 (기본적으로 Codex에 전달)
-- 예약 명령(`/mode`, `/new`, `/status`)이 아닌 `/...` 입력은 Codex 슬래시 명령으로 전달
+- 예약 명령(`/mode`, `/new`, `/status`, `/profile`)이 아닌 `/...` 입력은 Codex 슬래시 명령으로 전달
 - 예약 명령이 아닌 일반 문장 입력은 항상 Codex로 전달
 - `/new` 전까지는 같은 세션 history를 유지하며 연속 명령으로 처리
 - 모드를 설정하지 않은 신규 세션의 기본 모드는 `single`
@@ -116,6 +118,7 @@
 ### `/status` 응답 포맷 (예시)
 ```text
 mode: single
+profile: bridge, model=gpt-5, working_directory=/home/user/develop/bridge-project
 last_run: ok (4200ms)
 single_review: rounds=2/3, result=approved
 codex_mcp: running=true, ready=true, pid=12345, uptime=532s
@@ -155,6 +158,9 @@ last_error: -
 ### 최소 스키마
 - `session_id` (chat+user 기반)
 - `mode` (`single` | `multi`)
+- `profile_name` (예: `default`, `bridge`)
+- `profile_model` (선택)
+- `profile_working_directory` (선택)
 - `history_json` (대화 히스토리 아이템)
 - `run_lock` (boolean)
 - `last_review_round` (number, single 모드용)

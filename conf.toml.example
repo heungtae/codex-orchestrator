@@ -4,3 +4,14 @@
 # Example:
 # allowed_users = [123456789, 987654321]
 allowed_users = [123456789]
+
+[profile]
+# default = "default"
+
+[profiles.default]
+# model = "gpt-5"
+# working_directory = "~/develop/your-project"
+
+[profiles.bridge]
+# model = "gpt-5"
+# working_directory = "~/develop/bridge-project"

@@ -21,6 +21,11 @@ class CommandRouterTests(unittest.TestCase):
         self.assertEqual(route.kind, "bot_command")
         self.assertEqual(route.command, "status")
 
+        route = self.router.route("/profile list")
+        self.assertEqual(route.kind, "bot_command")
+        self.assertEqual(route.command, "profile")
+        self.assertEqual(route.args, ("list",))
+
     def test_non_reserved_slash_command_is_forwarded_to_codex(self) -> None:
         route = self.router.route("/edit add textbox")
         self.assertEqual(route.kind, "codex_slash")

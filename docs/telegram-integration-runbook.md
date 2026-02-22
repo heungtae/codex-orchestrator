@@ -60,10 +60,22 @@ export CODEX_MCP_STATUS_CMD='bash -lc "echo running=true,ready=true,pid=12345,up
 ```toml
 [telegram]
 allowed_users = [123456789]
+
+[profile]
+default = "bridge"
+
+[profiles.default]
+model = "gpt-5"
+working_directory = "~/develop/ai-agent/codex-orchestrator"
+
+[profiles.bridge]
+model = "gpt-5"
+working_directory = "~/develop/bridge-project"
 ```
 
 - `allowed_users`가 설정되면 목록에 없는 `from_user.id`는 `Unauthorized` 응답 후 요청이 차단된다.
 - `allowed_users` 키를 비워두거나 주석 처리하면 사용자 제한은 비활성화된다.
+- `/profile <name>` 전환 시 profile의 `model`, `working_directory`가 실행에 반영된다.
 
 ## 4) 실행 방법 (Polling)
 이 레포에는 long polling 실행 스크립트가 포함되어 있다.
@@ -95,12 +107,14 @@ Telegram에서 생성한 bot과 대화를 시작한 뒤 아래처럼 사용한�
 
 ### 5.1 기본 확인
 - `/start`: 사용 가능한 명령 확인
-- `/status`: 현재 모드/최근 실행/single 리뷰/codex_mcp 상태 확인
+- `/status`: 현재 모드/프로파일/최근 실행/single 리뷰/codex_mcp 상태 확인
 
 ### 5.2 모드 제어
 - `/mode single`: single 모드 전환 (기본값)
 - `/mode multi`: multi 모드 전환
 - `/new`: 현재 `chat_id:user_id` 세션 초기화 (mode=single)
+- `/profile list`: 프로파일 목록 조회
+- `/profile bridge`: `bridge` 프로파일로 전환
 
 ### 5.3 실제 작업 요청
 일반 텍스트를 그대로 보내면 Codex 워크플로우로 전달된다.
@@ -110,7 +124,7 @@ Telegram에서 생성한 bot과 대화를 시작한 뒤 아래처럼 사용한�
 - `로그인 API 에러 원인 분석해줘`
 
 슬래시 입력 규칙:
-- 예약 명령(`/start`, `/mode`, `/new`, `/status`)은 bot이 직접 처리
+- 예약 명령(`/start`, `/mode`, `/new`, `/status`, `/profile`)은 bot이 직접 처리
 - 그 외 `/...`는 Codex 슬래시 명령으로 전달
 
 ## 6) Single 모드 응답 이해

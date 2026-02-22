@@ -33,6 +33,15 @@ class CommandRouter:
                     args=(mode_arg,),
                 )
 
+            if command == "/profile":
+                profile_arg = parts[1].strip() if len(parts) > 1 else ""
+                return RouteResult(
+                    kind="bot_command",
+                    text=raw,
+                    command="profile",
+                    args=(profile_arg,),
+                )
+
             return RouteResult(kind="codex_slash", text=raw)
 
         return RouteResult(kind="text", text=raw)

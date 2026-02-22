@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from scripts.telegram_polling_runner import (
     _load_allowed_users_from_conf,
+    _next_offset_from_updates,
     _run_polling,
     _resolve_conf_path,
     _render_progress_message,
@@ -140,6 +141,21 @@ allowed_users = "123456789"
         self.assertTrue(len(api.messages) >= 1)
         self.assertTrue(all(message[0] == "100" for message in api.messages))
         self.assertTrue(all("working " in message[1] for message in api.messages))
+
+    def test_next_offset_from_updates_returns_latest_plus_one(self) -> None:
+        updates = [
+            {"update_id": 10},
+            {"update_id": 14},
+            {"update_id": 11},
+        ]
+        self.assertEqual(_next_offset_from_updates(updates), 15)
+
+    def test_next_offset_from_updates_ignores_invalid_update_id(self) -> None:
+        updates = [
+            {"update_id": "10"},
+            {"foo": "bar"},
+        ]
+        self.assertIsNone(_next_offset_from_updates(updates))
 
 
 if __name__ == "__main__":

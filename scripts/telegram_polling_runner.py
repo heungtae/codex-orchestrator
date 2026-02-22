@@ -28,6 +28,17 @@ _DEFAULT_CONF_TEMPLATE = (
     "# Telegram from_user.id allowlist (int or string).\n"
     "# Set this to enable user-based access control.\n"
     "# allowed_users = [123456789]\n"
+    "\n"
+    "[profile]\n"
+    "# default = \"default\"\n"
+    "\n"
+    "[profiles.default]\n"
+    "# model = \"gpt-5\"\n"
+    "# working_directory = \"~/develop/your-project\"\n"
+    "\n"
+    "[profiles.bridge]\n"
+    "# model = \"gpt-5\"\n"
+    "# working_directory = \"~/develop/bridge-project\"\n"
 )
 _UNAUTHORIZED_MESSAGE = "Unauthorized"
 
@@ -212,6 +223,20 @@ async def _run_blocking(func: Any, /, *args: Any, **kwargs: Any) -> Any:
     return await loop.run_in_executor(_BLOCKING_POOL, bound)
 
 
+def _next_offset_from_updates(updates: list[dict[str, Any]]) -> int | None:
+    latest_update_id: int | None = None
+    for update in updates:
+        update_id = update.get("update_id")
+        if not isinstance(update_id, int):
+            continue
+        if latest_update_id is None or update_id > latest_update_id:
+            latest_update_id = update_id
+
+    if latest_update_id is None:
+        return None
+    return latest_update_id + 1
+
+
 def _render_progress_message(
     *,
     template: str,
@@ -329,6 +354,7 @@ async def _run_polling() -> None:
     clear_webhook = _env_bool("TELEGRAM_DELETE_WEBHOOK_ON_START", True)
     drop_pending = _env_bool("TELEGRAM_DROP_PENDING_UPDATES", False)
     allowed_chat_ids = _parse_allowed_chat_ids(os.getenv("TELEGRAM_ALLOWED_CHAT_IDS", ""))
+    ignore_pending_updates_on_start = _env_bool("TELEGRAM_IGNORE_PENDING_UPDATES_ON_START", True)
 
     progress_notify = _env_bool("TELEGRAM_PROGRESS_NOTIFY", True)
     progress_initial_delay_sec = _env_float("TELEGRAM_PROGRESS_INITIAL_DELAY_SEC", 15.0)
@@ -353,6 +379,19 @@ async def _run_polling() -> None:
 
     orchestrator = build_orchestrator()
     try:
+        next_offset: int | None = None
+        if ignore_pending_updates_on_start:
+            try:
+                pending_updates = await _run_blocking(api.get_updates, offset=None, timeout=0)
+                next_offset = _next_offset_from_updates(pending_updates)
+                if next_offset is not None:
+                    print(
+                        "[info] skipped pending telegram updates on startup: "
+                        f"count={len(pending_updates)}, next_offset={next_offset}"
+                    )
+            except Exception as exc:
+                print(f"[warn] failed to skip pending telegram updates on startup: {exc}")
+
         require_mcp_warmup = _env_bool("TELEGRAM_REQUIRE_MCP_WARMUP", True)
         warmup_ok = await _warmup_codex_mcp(orchestrator)
         if require_mcp_warmup and not warmup_ok:
@@ -361,7 +400,6 @@ async def _run_polling() -> None:
                 "Check CODEX_MCP_COMMAND/CODEX_MCP_ARGS and runtime auth settings, "
                 "or disable strict check with TELEGRAM_REQUIRE_MCP_WARMUP=false"
             )
-        next_offset: int | None = None
 
         print("[info] telegram polling runner started")
         while True:

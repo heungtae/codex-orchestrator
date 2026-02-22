@@ -6,7 +6,7 @@ from typing import Any, Literal, TypedDict
 
 BotMode = Literal["single", "multi"]
 InputKind = Literal["bot_command", "codex_slash", "text"]
-BotCommandName = Literal["start", "mode", "new", "status"]
+BotCommandName = Literal["start", "mode", "new", "status", "profile"]
 ReviewResult = Literal["approved", "needs_changes", "max_rounds_reached"]
 RunStatus = Literal["idle", "ok", "error"]
 
@@ -36,6 +36,9 @@ class BotSession:
     last_run_latency_ms: int | None = None
     last_review_round: int = 0
     last_review_result: ReviewResult | None = None
+    profile_name: str = "default"
+    profile_model: str | None = None
+    profile_working_directory: str | None = None
     updated_at: str = field(default_factory=utc_now_iso)
 
     def touch(self) -> None:
@@ -54,6 +57,9 @@ class BotSession:
             "last_run_latency_ms": self.last_run_latency_ms,
             "last_review_round": self.last_review_round,
             "last_review_result": self.last_review_result,
+            "profile_name": self.profile_name,
+            "profile_model": self.profile_model,
+            "profile_working_directory": self.profile_working_directory,
             "updated_at": self.updated_at,
         }
 
@@ -75,6 +81,14 @@ class BotSession:
         if not isinstance(history, list):
             history = []
 
+        profile_name = str(payload.get("profile_name", "default") or "default").strip() or "default"
+        profile_model = payload.get("profile_model")
+        if profile_model is not None:
+            profile_model = str(profile_model).strip() or None
+        profile_working_directory = payload.get("profile_working_directory")
+        if profile_working_directory is not None:
+            profile_working_directory = str(profile_working_directory).strip() or None
+
         return cls(
             session_id=str(payload["session_id"]),
             chat_id=str(payload["chat_id"]),
@@ -87,6 +101,9 @@ class BotSession:
             last_run_latency_ms=payload.get("last_run_latency_ms"),
             last_review_round=int(payload.get("last_review_round", 0) or 0),
             last_review_result=last_review_result,
+            profile_name=profile_name,
+            profile_model=profile_model,
+            profile_working_directory=profile_working_directory,
             updated_at=str(payload.get("updated_at", utc_now_iso())),
         )
 

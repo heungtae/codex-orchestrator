@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from core.command_router import CommandRouter
 from core.models import BotSession, RouteResult
+from core.profiles import ExecutionProfile, ProfileRegistry
 from core.session_manager import SessionManager
 from core.trace_logger import TraceLogger
 from integrations.codex_executor import CodexExecutionError
@@ -24,6 +25,7 @@ class BotOrchestrator:
     multi_workflow: Workflow
     codex_mcp: CodexMcpServer
     working_directory: str | None = None
+    profile_registry: ProfileRegistry = field(default_factory=ProfileRegistry.build_default)
 
     async def handle_message(self, chat_id: str | int, user_id: str | int, text: str | None) -> str:
         run_id = str(uuid.uuid4())
@@ -120,13 +122,55 @@ class BotOrchestrator:
         if route.command == "new":
             async with self.session_manager.lock(chat_id=chat_id, user_id=user_id):
                 session = await self.session_manager.reset(chat_id=chat_id, user_id=user_id)
+                self._apply_profile_to_session(session, self.profile_registry.default_profile())
+                await self.session_manager.save(session)
             return "session reset. mode=single", session.mode
 
         if route.command == "status":
             async with self.session_manager.lock(chat_id=chat_id, user_id=user_id):
                 session = await self.session_manager.load(chat_id=chat_id, user_id=user_id)
+                if self._ensure_session_profile(session):
+                    await self.session_manager.save(session)
             mcp_status = self._safe_mcp_status()
             return self._format_status(session=session, mcp_status=mcp_status), session.mode
+
+        if route.command == "profile":
+            profile_arg = route.args[0].strip() if route.args else ""
+            if not profile_arg:
+                async with self.session_manager.lock(chat_id=chat_id, user_id=user_id):
+                    session = await self.session_manager.load(chat_id=chat_id, user_id=user_id)
+                    if self._ensure_session_profile(session):
+                        await self.session_manager.save(session)
+                return "usage: /profile list|<name>", session.mode
+
+            async with self.session_manager.lock(chat_id=chat_id, user_id=user_id):
+                session = await self.session_manager.load(chat_id=chat_id, user_id=user_id)
+                changed = self._ensure_session_profile(session)
+
+                if profile_arg.lower() == "list":
+                    if changed:
+                        await self.session_manager.save(session)
+                    return self._format_profile_list(session), session.mode
+
+                profile = self.profile_registry.get(profile_arg)
+                if profile is None:
+                    if changed:
+                        await self.session_manager.save(session)
+                    return f"profile not found: {profile_arg}\nusage: /profile list|<name>", session.mode
+
+                self._apply_profile_to_session(session, profile)
+                session.last_error = None
+                await self.session_manager.save(session)
+                model_text = session.profile_model or "-"
+                working_directory_text = session.profile_working_directory or "-"
+                return (
+                    (
+                        f"profile set to {session.profile_name}\n"
+                        f"model: {model_text}\n"
+                        f"working_directory: {working_directory_text}"
+                    ),
+                    session.mode,
+                )
 
         return "unsupported command", "single"
 
@@ -140,8 +184,11 @@ class BotOrchestrator:
     ) -> tuple[str, str, int | None, str | None]:
         async with self.session_manager.lock(chat_id=chat_id, user_id=user_id):
             session = await self.session_manager.load(chat_id=chat_id, user_id=user_id)
+            profile_changed = self._ensure_session_profile(session)
 
             if session.run_lock:
+                if profile_changed:
+                    await self.session_manager.save(session)
                 return (
                     "A task is already running for this session. Please try again shortly.",
                     session.mode,
@@ -216,6 +263,7 @@ class BotOrchestrator:
                 "/mode single|multi",
                 "/new",
                 "/status",
+                "/profile list|<name>",
                 "non-reserved /... and plain text are forwarded to Codex workflow",
                 f"session_working_directory: {working_directory}",
             ]
@@ -238,6 +286,11 @@ class BotOrchestrator:
 
         lines = [
             f"mode: {session.mode}",
+            (
+                f"profile: {session.profile_name}, "
+                f"model={session.profile_model or '-'}, "
+                f"working_directory={session.profile_working_directory or '-'}"
+            ),
             (
                 f"last_run: {session.last_run_status} "
                 f"({session.last_run_latency_ms}ms)"
@@ -265,4 +318,46 @@ class BotOrchestrator:
             )
 
         lines.append(f"last_error: {session.last_error or '-'}")
+        return "\n".join(lines)
+
+    def _ensure_session_profile(self, session: BotSession) -> bool:
+        selected = self.profile_registry.get(session.profile_name)
+        if selected is None:
+            selected = self.profile_registry.default_profile()
+            self._apply_profile_to_session(session, selected)
+            return True
+
+        normalized_name = selected.name
+        normalized_model = selected.model
+        normalized_working_directory = selected.working_directory
+        if (
+            session.profile_name != normalized_name
+            or session.profile_model != normalized_model
+            or session.profile_working_directory != normalized_working_directory
+        ):
+            self._apply_profile_to_session(session, selected)
+            return True
+        return False
+
+    @staticmethod
+    def _apply_profile_to_session(session: BotSession, profile: ExecutionProfile) -> None:
+        session.profile_name = profile.name
+        session.profile_model = profile.model
+        session.profile_working_directory = profile.working_directory
+
+    def _format_profile_list(self, session: BotSession) -> str:
+        default_profile = self.profile_registry.default_profile()
+        lines = ["profiles:"]
+        for name in sorted(self.profile_registry.profiles.keys(), key=str.lower):
+            profile = self.profile_registry.profiles[name]
+            active_prefix = "*" if profile.name == session.profile_name else "-"
+            default_suffix = " (default)" if profile.name == default_profile.name else ""
+            model_text = profile.model or "-"
+            working_directory_text = profile.working_directory or "-"
+            lines.append(
+                (
+                    f"{active_prefix} {profile.name}{default_suffix}: "
+                    f"model={model_text}, working_directory={working_directory_text}"
+                )
+            )
         return "\n".join(lines)

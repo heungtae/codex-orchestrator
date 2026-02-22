@@ -46,9 +46,21 @@ PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py' -q
 ```toml
 [telegram]
 allowed_users = [123456789]
+
+[profile]
+default = "bridge"
+
+[profiles.default]
+model = "gpt-5"
+working_directory = "~/develop/ai-agent/codex-orchestrator"
+
+[profiles.bridge]
+model = "gpt-5"
+working_directory = "~/develop/bridge-project"
 ```
 - 기본 경로(`~/.codex-orchestrator/conf.toml`) 파일이 없으면 runner 최초 실행 시 자동 생성됩니다.
 - `allowed_users` 설정 시 목록에 없는 Telegram 사용자는 `Unauthorized` 응답 후 차단됩니다.
+- `/profile <name>`으로 프로파일을 전환하면 `model`/`working_directory`가 해당 프로파일로 적용됩니다.
 
 예시:
 ```bash
@@ -82,10 +94,11 @@ PY
 - `/mode single|multi`: 모드 전환
 - `/new`: 현재 `chat_id:user_id` 세션 초기화 (모드도 `single`로 리셋)
 - `/status`: 현재 모드, 최근 실행 결과, single 리뷰 상태, codex_mcp 상태 출력
+- `/profile list|<name>`: 프로파일 목록 조회/전환
 - 일반 텍스트: 현재 모드 워크플로우로 즉시 전달
 
 라우팅 규칙:
-- 예약 명령(`/start`, `/mode`, `/new`, `/status`)만 내부 처리
+- 예약 명령(`/start`, `/mode`, `/new`, `/status`, `/profile`)만 내부 처리
 - 그 외 `/...`는 Codex 슬래시 명령으로 전달
 
 ## 5. Single 모드 동작
@@ -113,6 +126,7 @@ Single 모드는 Developer/Reviewer 반복 루프입니다.
 ## 7. `/status` 출력 예시
 ```text
 mode: single
+profile: bridge, model=gpt-5, working_directory=/home/user/develop/bridge-project
 last_run: ok (4200ms)
 single_review: rounds=2/3, result=approved
 codex_mcp: running=true, ready=true, pid=12345, uptime=532s

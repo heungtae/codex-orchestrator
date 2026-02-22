@@ -48,6 +48,25 @@ class FakeReviewer:
         return decision
 
 
+class CapturingExecutor:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, str | None]] = []
+
+    async def run(
+        self,
+        prompt: str,
+        history=None,
+        *,
+        system_instructions=None,
+        model=None,
+        cwd=None,
+    ) -> str:
+        self.calls.append({"model": model, "cwd": cwd, "system_instructions": system_instructions})
+        if isinstance(system_instructions, str) and "Reply in strict JSON" in system_instructions:
+            return '{"result":"approved","feedback":"ok"}'
+        return "developer output"
+
+
 class FailIfCalledReviewer:
     def __init__(self) -> None:
         self.calls = 0
@@ -160,6 +179,25 @@ class SingleWorkflowTests(unittest.TestCase):
                 {"role": "user", "content": "valid user input"},
             ],
         )
+
+    def test_profile_model_and_working_directory_are_forwarded_to_executor(self) -> None:
+        executor = CapturingExecutor()
+        workflow = SingleAgentWorkflow(
+            developer=LlmDeveloperAgent(executor=executor),
+            reviewer=LlmReviewerAgent(executor=executor),
+            max_review_rounds=3,
+            review_only_with_artifacts=False,
+        )
+        session = self._session()
+        session.profile_model = "gpt-5"
+        session.profile_working_directory = "/tmp/bridge"
+
+        asyncio.run(workflow.run("request", session))
+
+        self.assertTrue(len(executor.calls) >= 2)
+        for call in executor.calls:
+            self.assertEqual(call["model"], "gpt-5")
+            self.assertEqual(call["cwd"], "/tmp/bridge")
 
 
 if __name__ == "__main__":
