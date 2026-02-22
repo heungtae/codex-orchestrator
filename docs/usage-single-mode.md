@@ -52,6 +52,8 @@ mcp_command = "npx"
 mcp_args = "-y codex mcp-server"
 mcp_client_timeout_seconds = 360000
 allow_echo_executor = false
+approval_policy = "never"
+sandbox = "danger-full-access"
 mcp_direct_status = true
 # mcp_status_cmd = "bash -lc \"echo running=true,ready=true,pid=12345,uptime_sec=30\""
 mcp_auto_detect_process = false

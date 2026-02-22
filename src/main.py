@@ -37,6 +37,8 @@ class _CodexRuntimeConfig:
     agent_model: str | None = None
     agent_working_directory: str | None = None
     allow_echo_executor: bool = False
+    approval_policy: str = "never"
+    sandbox: str = "danger-full-access"
     mcp_direct_status: bool = True
     mcp_status_cmd: str | None = None
     mcp_auto_detect_process: bool = False
@@ -179,6 +181,20 @@ def _load_codex_runtime_config(conf_path: Path) -> _CodexRuntimeConfig:
         key_name="codex.allow_echo_executor",
         default=False,
     )
+    approval_policy = _optional_string(
+        value=raw_codex.get("approval_policy"),
+        conf_path=conf_path,
+        key_name="codex.approval_policy",
+        default="never",
+    )
+    assert approval_policy is not None
+    sandbox = _optional_string(
+        value=raw_codex.get("sandbox"),
+        conf_path=conf_path,
+        key_name="codex.sandbox",
+        default="danger-full-access",
+    )
+    assert sandbox is not None
     mcp_direct_status = _required_bool(
         value=raw_codex.get("mcp_direct_status"),
         conf_path=conf_path,
@@ -209,6 +225,8 @@ def _load_codex_runtime_config(conf_path: Path) -> _CodexRuntimeConfig:
         agent_model=agent_model,
         agent_working_directory=agent_working_directory,
         allow_echo_executor=allow_echo_executor,
+        approval_policy=approval_policy,
+        sandbox=sandbox,
         mcp_direct_status=mcp_direct_status,
         mcp_status_cmd=mcp_status_cmd,
         mcp_auto_detect_process=mcp_auto_detect_process,
@@ -245,6 +263,8 @@ def build_orchestrator() -> BotOrchestrator:
             client_session_timeout_seconds=codex_config.mcp_client_timeout_seconds,
             default_model=default_profile.model,
             status_tracker=codex_mcp,
+            approval_policy=codex_config.approval_policy,
+            sandbox=codex_config.sandbox,
             cwd=default_profile.working_directory,
         )
 

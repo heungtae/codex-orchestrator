@@ -50,6 +50,8 @@ _DEFAULT_CONF_TEMPLATE = (
     "# agent_model = \"gpt-5\"\n"
     "# agent_working_directory = \"~/develop/your-project\"\n"
     "allow_echo_executor = false\n"
+    "approval_policy = \"never\"\n"
+    "sandbox = \"danger-full-access\"\n"
     "mcp_direct_status = true\n"
     "# mcp_status_cmd = \"bash -lc \\\"echo running=true,ready=true,pid=12345,uptime_sec=30\\\"\"\n"
     "mcp_auto_detect_process = false\n"

@@ -38,7 +38,7 @@ class CodexMcpExecutor:
     history_char_limit: int = 6000
     status_tracker: Any | None = None
     approval_policy: str = "never"
-    sandbox: str = "workspace-write"
+    sandbox: str = "danger-full-access"
     cwd: str | None = None
     close_timeout_seconds: float = 2.0
 
