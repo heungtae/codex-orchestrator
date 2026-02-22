@@ -168,6 +168,17 @@ class OrchestratorTests(unittest.TestCase):
             not_found = asyncio.run(orchestrator.handle_message("1", "2", "/profile unknown"))
             self.assertIn("profile not found: unknown", not_found)
 
+    def test_plain_profile_command_switches_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            orchestrator = self._build(Path(tmp))
+
+            switched = asyncio.run(orchestrator.handle_message("1", "2", "profile bridge"))
+            self.assertIn("profile set to bridge", switched)
+            self.assertIn("working_directory: /tmp/bridge", switched)
+
+            status = asyncio.run(orchestrator.handle_message("1", "2", "/status"))
+            self.assertIn("profile: bridge, model=gpt-5, working_directory=/tmp/bridge", status)
+
     def test_cancel_command_returns_no_running_task_when_idle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             orchestrator = self._build(Path(tmp))

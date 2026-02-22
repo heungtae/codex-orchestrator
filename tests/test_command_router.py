@@ -49,6 +49,22 @@ class CommandRouterTests(unittest.TestCase):
         self.assertEqual(route.kind, "text")
         self.assertEqual(route.text, "add a textbox to the file")
 
+    def test_plain_profile_command_is_parsed(self) -> None:
+        route = self.router.route("profile bridge")
+        self.assertEqual(route.kind, "bot_command")
+        self.assertEqual(route.command, "profile")
+        self.assertEqual(route.args, ("bridge",))
+
+        route = self.router.route("profile")
+        self.assertEqual(route.kind, "bot_command")
+        self.assertEqual(route.command, "profile")
+        self.assertEqual(route.args, ("",))
+
+    def test_plain_profile_command_with_extra_tokens_is_forwarded_as_text(self) -> None:
+        route = self.router.route("profile bridge please")
+        self.assertEqual(route.kind, "text")
+        self.assertEqual(route.text, "profile bridge please")
+
 
 if __name__ == "__main__":
     unittest.main()

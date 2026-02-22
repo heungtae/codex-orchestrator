@@ -48,4 +48,16 @@ class CommandRouter:
 
             return RouteResult(kind="codex_slash", text=raw)
 
+        parts = raw.split()
+        if parts:
+            command = parts[0].lower()
+            if command == "profile" and len(parts) <= 2:
+                profile_arg = parts[1].strip() if len(parts) > 1 else ""
+                return RouteResult(
+                    kind="bot_command",
+                    text=raw,
+                    command="profile",
+                    args=(profile_arg,),
+                )
+
         return RouteResult(kind="text", text=raw)
