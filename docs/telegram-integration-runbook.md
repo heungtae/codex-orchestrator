@@ -48,7 +48,28 @@ cp conf.toml.example ~/.codex-orchestrator/conf.toml
 참고:
 - conf 파일이 없으면 runner 최초 실행 시 기본 템플릿을 자동 생성한다.
 
-### 4.3 최소 conf 예시
+### 4.3 Telegram user_id 확인 방법
+`telegram.allowed_users`를 정확히 설정하려면 먼저 본인 `user_id`를 확인해야 한다.
+
+방법 A: runner stdout 로그로 확인 (권장)
+1. conf에서 `allowed_users`를 잠시 비우거나 주석 처리한다.
+2. runner를 실행한다.
+3. Telegram에서 bot에 아무 메시지나 보낸다.
+4. runner stdout의 아래 로그에서 `user_id` 값을 확인한다.
+
+```text
+[telegram-inbound] chat_id=123456789 user_id=987654321 text=/start
+```
+
+방법 B: Telegram Bot API `getUpdates`로 확인
+```bash
+curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates" | jq .
+```
+- `jq`가 없으면 `| python3 -m json.tool`로 대체할 수 있다.
+- 응답 JSON의 `message.from.id`가 `user_id`다.
+- 함께 보이는 `message.chat.id`는 `chat_id`다.
+
+### 4.4 최소 conf 예시
 ```toml
 [telegram]
 allowed_users = [123456789]
@@ -70,7 +91,6 @@ allow_echo_executor = false
 approval_policy = "never"
 sandbox = "danger-full-access"
 mcp_direct_status = true
-# mcp_status_cmd = "bash -lc \"echo running=true,ready=true,pid=12345,uptime_sec=30\""
 mcp_auto_detect_process = false
 
 [profile]

@@ -54,32 +54,29 @@ allow_echo_executor = false
 approval_policy = "never"
 sandbox = "danger-full-access"
 mcp_direct_status = true
-# mcp_status_cmd = "bash -lc \"echo running=true,ready=true,pid=12345,uptime_sec=30\""
 mcp_auto_detect_process = false
-# agent_model = "gpt-5"
-# agent_working_directory = "~/develop/ai-agent/codex-orchestrator"
 
 [profile]
-default = "bridge"
+default = "default"
 
 [profiles.default]
 model = "gpt-5"
 working_directory = "~/develop/ai-agent/codex-orchestrator"
 
+# If both system_prompt and system_prompt_file are set, system_prompt_file takes precedence.
 [agents.single.planner]
 model = "gpt-5"
 system_prompt = "You are Planner Agent. Build concise implementation handoff."
+system_prompt_file = "./prompts/planner.txt"
 
 [agents.single.developer]
 model = "gpt-5-codex"
+system_prompt = "You are Developer Agent. Implement the approved plan with minimal complexity."
 system_prompt_file = "./prompts/developer.txt"
 
 [agents.single.reviewer]
 system_prompt = "You are Reviewer Agent. Focus on concrete diffs and risks."
-
-[profiles.bridge]
-model = "gpt-5"
-working_directory = "~/develop/bridge-project"
+system_prompt_file = "./prompts/reviewer.txt"
 ```
 - 기본 경로(`~/.codex-orchestrator/conf.toml`) 파일이 없으면 runner 최초 실행 시 자동 생성됩니다.
 - `allowed_users` 설정 시 목록에 없는 Telegram 사용자는 `Unauthorized` 응답 후 차단됩니다.

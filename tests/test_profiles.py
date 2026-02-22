@@ -105,6 +105,34 @@ model = "gpt-5-front"
             self.assertIn("single.developer", bridge.agent_overrides)
             self.assertIn("single.reviewer", bridge.agent_overrides)
 
+    def test_system_prompt_file_takes_precedence_over_inline_system_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt_file = root / "prompts" / "planner.txt"
+            prompt_file.parent.mkdir(parents=True, exist_ok=True)
+            prompt_file.write_text("Planner prompt from file", encoding="utf-8")
+
+            conf = root / "conf.toml"
+            conf.write_text(
+                """
+[profiles.default]
+model = "gpt-5"
+
+[agents.single.planner]
+system_prompt = "Inline planner prompt"
+system_prompt_file = "./prompts/planner.txt"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            registry = load_profiles_from_conf(conf)
+            profile = registry.default_profile()
+            planner = profile.agent_overrides.get("single.planner")
+
+            self.assertIsNotNone(planner)
+            assert planner is not None
+            self.assertEqual(planner.system_prompt, "Planner prompt from file")
+
     def test_load_profiles_from_conf_with_agents_only_uses_default_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             conf = Path(tmp) / "conf.toml"

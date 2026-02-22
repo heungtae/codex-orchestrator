@@ -37,6 +37,7 @@ model = "gpt-5"
 working_directory = "~/develop/bridge-project"
 
 # Global agent overrides (applies to all profiles unless overridden).
+# If both system_prompt and system_prompt_file are set, system_prompt_file takes precedence.
 # [agents.single.planner]
 # model = "gpt-5"
 # system_prompt = "You are Planner Agent..."
@@ -50,30 +51,39 @@ working_directory = "~/develop/bridge-project"
 # [agents.single.reviewer]
 # model = "gpt-5"
 # system_prompt = "You are Reviewer Agent..."
+# system_prompt_file = "./prompts/reviewer.txt"
 #
 # Multi role overrides.
-# Option A) Shared override for all multi roles:
+# If both system_prompt and system_prompt_file are set, system_prompt_file takes precedence.
+# Shared override for all multi roles.
 # [agents.multi]
 # model = "gpt-5"
 # system_prompt = "You are Multi Agent..."
+# system_prompt_file = "./prompts/multi.txt"
 #
-# Option B) Per-role overrides (do not combine with [agents.multi]):
+# Per-role overrides (optional).
+# Can be combined with [agents.multi]; per-role keys take precedence.
 # [agents.multi.designer]
 # model = "gpt-5"
 # system_prompt = "You are Multi Designer Agent..."
+# system_prompt_file = "./prompts/multi-designer.txt"
 #
 # [agents.multi.frontend.developer]
 # model = "gpt-5"
 # system_prompt = "You are Multi Frontend Developer Agent..."
+# system_prompt_file = "./prompts/multi-frontend-developer.txt"
 #
 # [agents.multi.backend.developer]
 # model = "gpt-5"
 # system_prompt = "You are Multi Backend Developer Agent..."
+# system_prompt_file = "./prompts/multi-backend-developer.txt"
 #
 # [agents.multi.tester]
 # model = "gpt-5"
 # system_prompt = "You are Multi Tester Agent..."
+# system_prompt_file = "./prompts/multi-tester.txt"
 #
 # [agents.multi.manager]
 # model = "gpt-5"
 # system_prompt = "You are Multi Manager Agent..."
+# system_prompt_file = "./prompts/multi-manager.txt"
