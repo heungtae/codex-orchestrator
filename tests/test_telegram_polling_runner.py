@@ -1,10 +1,13 @@
 import asyncio
+import logging
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from scripts.telegram_polling_runner import (
+    _ACTIVE_NOTIFICATION_HANDLER,
+    _CodexEventValidationFilter,
     _load_allowed_users_from_conf,
     _next_offset_from_updates,
     _run_polling,
@@ -119,7 +122,7 @@ allowed_users = "123456789"
         self.assertEqual(output, "done")
         self.assertEqual(api.messages, [])
 
-    def test_progress_notification_is_sent_for_slow_request(self) -> None:
+    def test_slow_request_does_not_emit_synthetic_progress_message(self) -> None:
         orchestrator = _SlowOrchestrator(delay_sec=0.28, output="done")
         api = _FakeTelegramApi()
 
@@ -138,9 +141,7 @@ allowed_users = "123456789"
         )
 
         self.assertEqual(output, "done")
-        self.assertTrue(len(api.messages) >= 1)
-        self.assertTrue(all(message[0] == "100" for message in api.messages))
-        self.assertTrue(all("working " in message[1] for message in api.messages))
+        self.assertEqual(api.messages, [])
 
     def test_next_offset_from_updates_returns_latest_plus_one(self) -> None:
         updates = [
@@ -156,6 +157,160 @@ allowed_users = "123456789"
             {"foo": "bar"},
         ]
         self.assertIsNone(_next_offset_from_updates(updates))
+
+    def test_codex_event_validation_filter_prints_agent_text_notification(self) -> None:
+        filter_ = _CodexEventValidationFilter()
+        record = logging.LogRecord(
+            name="root",
+            level=logging.WARNING,
+            pathname=__file__,
+            lineno=1,
+            msg=(
+                "Failed to validate notification: validation error. "
+                "Message was: method='codex/event' "
+                "params={'msg': {'type': 'item_completed', 'item': {'type': 'AgentMessage', "
+                "'id': 'msg_1', 'content': [{'type': 'Text', 'text': 'hello world'}], "
+                "'phase': 'commentary'}}} jsonrpc='2.0'"
+            ),
+            args=(),
+            exc_info=None,
+        )
+
+        with patch("builtins.print") as mocked_print:
+            allowed = filter_.filter(record)
+
+        self.assertFalse(allowed)
+        self.assertEqual(mocked_print.call_count, 1)
+        printed = mocked_print.call_args.args[0]
+        self.assertIn("[codex-notification]", printed)
+        self.assertIn("id=msg_1", printed)
+        self.assertIn("phase=commentary", printed)
+        self.assertIn("text=hello world", printed)
+        self.assertEqual(mocked_print.call_args.kwargs, {"flush": True})
+
+    def test_codex_event_validation_filter_prints_final_answer_to_stdout(self) -> None:
+        filter_ = _CodexEventValidationFilter()
+        record = logging.LogRecord(
+            name="root",
+            level=logging.WARNING,
+            pathname=__file__,
+            lineno=1,
+            msg=(
+                "Failed to validate notification: validation error. "
+                "Message was: method='codex/event' "
+                "params={'msg': {'type': 'item_completed', 'item': {'type': 'AgentMessage', "
+                "'id': 'msg_final', 'content': [{'type': 'Text', 'text': 'done'}], "
+                "'phase': 'final_answer'}}} jsonrpc='2.0'"
+            ),
+            args=(),
+            exc_info=None,
+        )
+
+        with patch("builtins.print") as mocked_print:
+            allowed = filter_.filter(record)
+
+        self.assertFalse(allowed)
+        self.assertEqual(mocked_print.call_count, 1)
+        printed = mocked_print.call_args.args[0]
+        self.assertIn("id=msg_final", printed)
+        self.assertIn("phase=final_answer", printed)
+        self.assertIn("text=done", printed)
+        self.assertEqual(mocked_print.call_args.kwargs, {"flush": True})
+
+    def test_codex_event_validation_filter_dispatches_non_final_only(self) -> None:
+        filter_ = _CodexEventValidationFilter()
+        delivered: list[tuple[str, str, str]] = []
+
+        def _capture(notification: object) -> None:
+            delivered.append(
+                (
+                    getattr(notification, "message_id"),
+                    getattr(notification, "phase"),
+                    getattr(notification, "text"),
+                )
+            )
+
+        commentary = logging.LogRecord(
+            name="root",
+            level=logging.WARNING,
+            pathname=__file__,
+            lineno=1,
+            msg=(
+                "Failed to validate notification: validation error. "
+                "Message was: method='codex/event' "
+                "params={'msg': {'type': 'item_completed', 'item': {'type': 'AgentMessage', "
+                "'id': 'msg_mid', 'content': [{'type': 'Text', 'text': 'progress'}], "
+                "'phase': 'commentary'}}} jsonrpc='2.0'"
+            ),
+            args=(),
+            exc_info=None,
+        )
+        final_answer = logging.LogRecord(
+            name="root",
+            level=logging.WARNING,
+            pathname=__file__,
+            lineno=1,
+            msg=(
+                "Failed to validate notification: validation error. "
+                "Message was: method='codex/event' "
+                "params={'msg': {'type': 'item_completed', 'item': {'type': 'AgentMessage', "
+                "'id': 'msg_final', 'content': [{'type': 'Text', 'text': 'final'}], "
+                "'phase': 'final_answer'}}} jsonrpc='2.0'"
+            ),
+            args=(),
+            exc_info=None,
+        )
+
+        token = _ACTIVE_NOTIFICATION_HANDLER.set(_capture)
+        try:
+            with patch("builtins.print"):
+                self.assertFalse(filter_.filter(commentary))
+                self.assertFalse(filter_.filter(final_answer))
+        finally:
+            _ACTIVE_NOTIFICATION_HANDLER.reset(token)
+
+        self.assertEqual(delivered, [("msg_mid", "commentary", "progress")])
+
+    def test_codex_event_validation_filter_ignores_other_event_types(self) -> None:
+        filter_ = _CodexEventValidationFilter()
+        record = logging.LogRecord(
+            name="root",
+            level=logging.WARNING,
+            pathname=__file__,
+            lineno=1,
+            msg=(
+                "Failed to validate notification: validation error. "
+                "Message was: method='codex/event' "
+                "params={'msg': {'type': 'item_started', 'item': {'type': 'AgentMessage', "
+                "'id': 'msg_1', 'content': [], 'phase': 'commentary'}}} jsonrpc='2.0'"
+            ),
+            args=(),
+            exc_info=None,
+        )
+
+        with patch("builtins.print") as mocked_print:
+            allowed = filter_.filter(record)
+
+        self.assertFalse(allowed)
+        mocked_print.assert_not_called()
+
+    def test_codex_event_validation_filter_allows_other_logs(self) -> None:
+        filter_ = _CodexEventValidationFilter()
+        record = logging.LogRecord(
+            name="root",
+            level=logging.WARNING,
+            pathname=__file__,
+            lineno=1,
+            msg="some other warning",
+            args=(),
+            exc_info=None,
+        )
+
+        with patch("builtins.print") as mocked_print:
+            allowed = filter_.filter(record)
+
+        self.assertTrue(allowed)
+        mocked_print.assert_not_called()
 
 
 if __name__ == "__main__":

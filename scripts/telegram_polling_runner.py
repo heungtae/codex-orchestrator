@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import ast
 import asyncio
+import contextvars
 import functools
 import json
 import logging
@@ -41,6 +43,19 @@ _DEFAULT_CONF_TEMPLATE = (
     "# working_directory = \"~/develop/bridge-project\"\n"
 )
 _UNAUTHORIZED_MESSAGE = "Unauthorized"
+
+
+@dataclass(frozen=True)
+class _AgentTextNotification:
+    message_id: str
+    phase: str
+    text: str
+
+
+_ACTIVE_NOTIFICATION_HANDLER: contextvars.ContextVar[
+    Any | None
+] = contextvars.ContextVar("codex_notification_handler", default=None)
+_ACTIVE_NOTIFICATION_HANDLER_FALLBACK: Any | None = None
 
 
 @dataclass
@@ -107,11 +122,152 @@ class TelegramBotApi:
 
 
 class _CodexEventValidationFilter(logging.Filter):
-    """Suppress known MCP notification schema noise from `codex/event`."""
+    """Emit selected `codex/event` notifications and suppress warning noise."""
+
+    @staticmethod
+    def _extract_notification_payload(message: str) -> str:
+        marker = "Message was:"
+        if marker in message:
+            payload = message.split(marker, 1)[1].strip()
+            if payload:
+                return payload
+        return message
+
+    @staticmethod
+    def _extract_params_literal(payload: str) -> str | None:
+        marker = "params="
+        marker_index = payload.find(marker)
+        if marker_index < 0:
+            return None
+
+        raw = payload[marker_index + len(marker) :]
+        start = raw.find("{")
+        if start < 0:
+            return None
+
+        depth = 0
+        in_single = False
+        in_double = False
+        escaped = False
+        started = False
+
+        for index, char in enumerate(raw[start:], start=start):
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\":
+                escaped = True
+                continue
+
+            if char == "'" and not in_double:
+                in_single = not in_single
+                continue
+            if char == '"' and not in_single:
+                in_double = not in_double
+                continue
+            if in_single or in_double:
+                continue
+
+            if char == "{":
+                depth += 1
+                started = True
+                continue
+            if char == "}":
+                depth -= 1
+                if started and depth == 0:
+                    return raw[start : index + 1]
+
+        return None
+
+    @classmethod
+    def _extract_agent_text_notification(cls, message: str) -> _AgentTextNotification | None:
+        payload = cls._extract_notification_payload(message)
+        if "method='codex/event'" not in payload:
+            return None
+
+        params_literal = cls._extract_params_literal(payload)
+        if params_literal is None:
+            return None
+
+        try:
+            params = ast.literal_eval(params_literal)
+        except Exception:
+            return None
+        if not isinstance(params, dict):
+            return None
+
+        msg = params.get("msg")
+        if not isinstance(msg, dict):
+            return None
+        if msg.get("type") != "item_completed":
+            return None
+
+        item = msg.get("item")
+        if not isinstance(item, dict):
+            return None
+        if item.get("type") != "AgentMessage":
+            return None
+
+        phase = item.get("phase")
+        if not isinstance(phase, str) or not phase:
+            return None
+
+        content = item.get("content")
+        if not isinstance(content, list):
+            return None
+
+        text_parts: list[str] = []
+        for content_item in content:
+            if not isinstance(content_item, dict):
+                continue
+            if content_item.get("type") != "Text":
+                continue
+            text = content_item.get("text")
+            if isinstance(text, str) and text:
+                text_parts.append(text)
+
+        if not text_parts:
+            return None
+
+        message_id = item.get("id")
+        return _AgentTextNotification(
+            message_id=message_id if isinstance(message_id, str) else "",
+            phase=phase,
+            text="\n".join(text_parts),
+        )
+
+    @staticmethod
+    def _format_agent_text_notification(notification: _AgentTextNotification) -> str:
+        return (
+            "[codex-notification] "
+            f"id={notification.message_id} "
+            f"phase={notification.phase} "
+            f"text={notification.text}"
+        )
+
+    @staticmethod
+    def _dispatch_intermediate_notification(notification: _AgentTextNotification) -> None:
+        if notification.phase == "final_answer":
+            return
+
+        callback = _ACTIVE_NOTIFICATION_HANDLER.get()
+        if callback is None:
+            callback = _ACTIVE_NOTIFICATION_HANDLER_FALLBACK
+        if callback is None:
+            return
+
+        try:
+            callback(notification)
+        except Exception as exc:
+            print(f"[warn] failed to dispatch codex notification: {exc}")
 
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
         if "Failed to validate notification" in message and "codex/event" in message:
+            notification = self._extract_agent_text_notification(message)
+            if notification is not None:
+                print(self._format_agent_text_notification(notification), flush=True)
+                self._dispatch_intermediate_notification(notification)
             return False
         return True
 
@@ -264,26 +420,39 @@ async def _run_with_progress_notifications(
     interval_sec: float,
     message_template: str,
 ) -> str:
-    run_task = asyncio.create_task(orchestrator.handle_message(chat_id, user_id, text))
-    if not enabled:
-        return await run_task
+    del enabled, initial_delay_sec, interval_sec, message_template
+    loop = asyncio.get_running_loop()
 
-    started = time.monotonic()
-    progress_count = 0
+    def _forward_intermediate(notification: _AgentTextNotification) -> None:
+        async def _send() -> None:
+            try:
+                await _run_blocking(_safe_send, api, chat_id, notification.text)
+            except Exception as exc:
+                print(f"[warn] failed to forward intermediate codex notification: {exc}")
 
-    while True:
-        timeout = initial_delay_sec if progress_count == 0 else interval_sec
         try:
-            return await asyncio.wait_for(asyncio.shield(run_task), timeout=timeout)
-        except asyncio.TimeoutError:
-            progress_count += 1
-            elapsed_sec = int(time.monotonic() - started)
-            progress_message = _render_progress_message(
-                template=message_template,
-                elapsed_sec=elapsed_sec,
-                progress_count=progress_count,
-            )
-            await _run_blocking(_safe_send, api, chat_id, progress_message)
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run_coroutine_threadsafe(_send(), loop)
+            return
+
+        if running_loop is loop:
+            loop.create_task(_send())
+            return
+
+        asyncio.run_coroutine_threadsafe(_send(), loop)
+
+    global _ACTIVE_NOTIFICATION_HANDLER_FALLBACK
+    callback_token = _ACTIVE_NOTIFICATION_HANDLER.set(_forward_intermediate)
+    _ACTIVE_NOTIFICATION_HANDLER_FALLBACK = _forward_intermediate
+    run_task = asyncio.create_task(orchestrator.handle_message(chat_id, user_id, text))
+
+    try:
+        return await run_task
+    finally:
+        _ACTIVE_NOTIFICATION_HANDLER.reset(callback_token)
+        if _ACTIVE_NOTIFICATION_HANDLER_FALLBACK is _forward_intermediate:
+            _ACTIVE_NOTIFICATION_HANDLER_FALLBACK = None
 
 
 def _extract_executor(orchestrator: Any) -> Any | None:
