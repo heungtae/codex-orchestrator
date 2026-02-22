@@ -27,25 +27,36 @@ PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py' -q
 ```
 
 ### 3.2 환경 변수 설정 (선택)
-- `CODEX_MCP_COMMAND`: MCP 실행 커맨드(기본 `npx`)
-- `CODEX_MCP_ARGS`: MCP 실행 인자(기본 `-y codex mcp-server`)
-- `CODEX_MCP_CLIENT_TIMEOUT_SECONDS`: MCP client 세션 타임아웃(기본 `360000`)
-- `CODEX_AGENT_MODEL`: Codex 모델 오버라이드(선택)
-- `CODEX_MCP_STATUS_CMD`: MCP 상태 조회 명령
-- `CODEX_ALLOW_ECHO_EXECUTOR`: `true`일 때만 Echo 실행기 허용(디버그 전용)
-- `CODEX_CONF_PATH`: 사용자 허용 목록 conf 파일 경로(기본 `~/.codex-orchestrator/conf.toml`)
-- `TELEGRAM_PROGRESS_NOTIFY`: polling runner 장시간 요청 진행 알림 활성화(기본 `true`)
-- `TELEGRAM_PROGRESS_INITIAL_DELAY_SEC`: 첫 진행 알림 대기 시간(기본 `15`)
-- `TELEGRAM_PROGRESS_INTERVAL_SEC`: 진행 알림 주기(기본 `20`)
-- `TELEGRAM_PROGRESS_MESSAGE`: 진행 알림 템플릿(기본 `still working... elapsed={elapsed_sec}s`)
+- `TELEGRAM_BOT_TOKEN`: Telegram Bot API token
+- `CODEX_CONF_PATH`: conf 파일 경로(기본 `~/.codex-orchestrator/conf.toml`)
 
-설정하지 않으면:
-- MCP 상태는 `ps` 기반으로 `codex mcp-server` 프로세스를 자동 탐지 시도
+실행 옵션은 `conf.toml`에서 관리합니다.
 
 `conf.toml` 예시:
 ```toml
 [telegram]
 allowed_users = [123456789]
+
+[telegram.polling]
+poll_timeout = 30
+loop_sleep_sec = 1
+delete_webhook_on_start = true
+drop_pending_updates = false
+ignore_pending_updates_on_start = true
+# allowed_chat_ids = [123456789, 987654321]
+require_mcp_warmup = true
+cancel_wait_timeout_sec = 5
+
+[codex]
+mcp_command = "npx"
+mcp_args = "-y codex mcp-server"
+mcp_client_timeout_seconds = 360000
+allow_echo_executor = false
+mcp_direct_status = true
+# mcp_status_cmd = "bash -lc \"echo running=true,ready=true,pid=12345,uptime_sec=30\""
+mcp_auto_detect_process = false
+# agent_model = "gpt-5"
+# agent_working_directory = "~/develop/ai-agent/codex-orchestrator"
 
 [profile]
 default = "bridge"
@@ -102,13 +113,6 @@ working_directory = "~/develop/bridge-project"
 - agent별 값이 없으면 기본값을 사용합니다.
   - model 기본값: `profiles.<name>.model`
   - system prompt 기본값: single은 내장 기본 프롬프트, multi는 미지정
-
-예시:
-```bash
-export CODEX_MCP_COMMAND='npx'
-export CODEX_MCP_ARGS='-y codex mcp-server'
-export CODEX_MCP_STATUS_CMD='bash -lc "echo running=true,ready=true,pid=12345,uptime_sec=30"'
-```
 
 주의:
 - 실행 경로는 MCP client + `codex` MCP tool 직접 호출입니다.
@@ -176,7 +180,7 @@ last_error: -
 ```
 
 ## 8. Codex MCP 상태 커맨드 형식
-`CODEX_MCP_STATUS_CMD` 출력은 다음 중 하나를 지원합니다.
+`codex.mcp_status_cmd` 출력은 다음 중 하나를 지원합니다.
 - JSON: `{"running":true,"ready":true,"pid":12345,"uptime_sec":120}`
 - key=value CSV: `running=true,ready=true,pid=12345,uptime_sec=120`
 

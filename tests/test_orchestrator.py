@@ -139,7 +139,7 @@ class OrchestratorTests(unittest.TestCase):
             )
 
             response = asyncio.run(orchestrator.handle_message("1", "2", "test"))
-            self.assertIn("CODEX_MCP_COMMAND", response)
+            self.assertIn("[codex].mcp_command", response)
             self.assertIn("detail:", response)
 
     def test_profile_list_and_switch(self) -> None:

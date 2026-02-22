@@ -30,36 +30,38 @@ python3 -m pip install mcp python-dotenv
 ```bash
 export TELEGRAM_BOT_TOKEN='발급받은_토큰'
 
-# 선택: Codex MCP 실행 커맨드/인자
-export CODEX_MCP_COMMAND='npx'
-export CODEX_MCP_ARGS='-y codex mcp-server'
-export CODEX_MCP_CLIENT_TIMEOUT_SECONDS='360000'
-
-# 선택: Codex 모델 오버라이드
-# export CODEX_AGENT_MODEL='gpt-5'
-
-# 선택: MCP 상태 조회 커맨드
-export CODEX_MCP_STATUS_CMD='bash -lc "echo running=true,ready=true,pid=12345,uptime_sec=30"'
-
-# 선택: 허용 chat_id 제한 (콤마 구분)
-# export TELEGRAM_ALLOWED_CHAT_IDS='123456789,987654321'
-
 # 선택: conf.toml 경로
 # 기본값: ~/.codex-orchestrator/conf.toml
 # export CODEX_CONF_PATH="$HOME/.codex-orchestrator/conf.toml"
-
-# 디버그 전용: Echo 실행기 강제
-# export CODEX_ALLOW_ECHO_EXECUTOR='true'
 ```
 
-`CODEX_MCP_STATUS_CMD`를 설정하지 않으면 `ps` 기반으로 `codex mcp-server` 프로세스를 자동 탐지한다.
-
-`conf.toml`로 Telegram 사용자 허용 목록을 설정할 수 있다.
+실행 옵션은 `conf.toml`에서 관리한다.
 기본 경로(`~/.codex-orchestrator/conf.toml`) 파일이 없으면 runner가 최초 실행 시 자동 생성한다.
 
 ```toml
 [telegram]
 allowed_users = [123456789]
+
+[telegram.polling]
+poll_timeout = 30
+loop_sleep_sec = 1
+delete_webhook_on_start = true
+drop_pending_updates = false
+ignore_pending_updates_on_start = true
+# allowed_chat_ids = [123456789, 987654321]
+require_mcp_warmup = true
+cancel_wait_timeout_sec = 5
+
+[codex]
+mcp_command = "npx"
+mcp_args = "-y codex mcp-server"
+mcp_client_timeout_seconds = 360000
+allow_echo_executor = false
+mcp_direct_status = true
+# mcp_status_cmd = "bash -lc \"echo running=true,ready=true,pid=12345,uptime_sec=30\""
+mcp_auto_detect_process = false
+# agent_model = "gpt-5"
+# agent_working_directory = "~/develop/ai-agent/codex-orchestrator"
 
 [profile]
 default = "bridge"
@@ -123,19 +125,10 @@ working_directory = "~/develop/bridge-project"
 PYTHONPATH=src python3 scripts/telegram_polling_runner.py
 ```
 
-옵션 환경 변수:
-- `TELEGRAM_POLL_TIMEOUT` (기본 `30`): `getUpdates` long poll timeout
-- `TELEGRAM_LOOP_SLEEP_SEC` (기본 `1`): 루프 사이 sleep
-- `TELEGRAM_DELETE_WEBHOOK_ON_START` (기본 `true`): 시작 시 webhook 해제
-- `TELEGRAM_DROP_PENDING_UPDATES` (기본 `false`): webhook 해제 시 대기 update 제거 여부
-- `TELEGRAM_ALLOWED_CHAT_IDS`: 허용 chat id 목록
-- `CODEX_CONF_PATH` (기본 `~/.codex-orchestrator/conf.toml`): conf.toml 파일 경로
-- `TELEGRAM_REQUIRE_MCP_WARMUP` (기본 `true`): 시작 시 MCP warmup 실패하면 프로세스 종료
-- `TELEGRAM_PROGRESS_NOTIFY` (기본 `true`): 장시간 요청 진행 알림 메시지 활성화
-- `TELEGRAM_PROGRESS_INITIAL_DELAY_SEC` (기본 `15`): 첫 진행 알림까지 대기 시간(초)
-- `TELEGRAM_PROGRESS_INTERVAL_SEC` (기본 `20`): 진행 알림 주기(초)
-- `TELEGRAM_PROGRESS_MESSAGE` (기본 `still working... elapsed={elapsed_sec}s`): 진행 알림 템플릿
-  - 지원 플레이스홀더: `{elapsed_sec}`, `{progress_count}`
+옵션 설정 위치:
+- `CODEX_CONF_PATH` (기본 `~/.codex-orchestrator/conf.toml`): conf.toml 파일 경로 지정
+- `telegram.polling.*`: polling 관련 런타임 설정
+- `codex.*`: MCP 실행/상태 조회 관련 설정
 
 참고:
 - polling 사용 시 기존 webhook이 있으면 충돌할 수 있어 기본으로 `deleteWebhook`를 호출한다.
@@ -196,19 +189,19 @@ single 모드는 Developer/Reviewer 반복 루프(최대 3회)로 동작한다.
 4. bot과 채팅을 실제로 시작했는지 확인 (`/start` 먼저 입력)
 
 ### `/status`에서 `codex_mcp: unknown`
-- `CODEX_MCP_STATUS_CMD` 실행 실패 또는 상태 조회 예외 상태
+- `codex.mcp_status_cmd` 실행 실패 또는 상태 조회 예외 상태
 - 상태 조회 명령을 단독으로 먼저 실행해 출력 형식을 점검
 
 ### `/status`에서 `codex_mcp: running=false`가 나올 때
 1. 실제 프로세스 확인:
    - `ps -eo pid,etimes,args | rg 'codex mcp-server'`
 2. 프로세스가 보이지 않으면 orchestrator 기준으로는 실행 중이 아님
-3. 프로세스가 보이는데도 false면 `CODEX_MCP_STATUS_CMD`를 명시해 강제 상태 조회 사용
+3. 프로세스가 보이는데도 false면 `codex.mcp_status_cmd`를 명시해 강제 상태 조회 사용
 
 ### 응답에 `You are Developer Agent...` 프롬프트가 반복될 때
-1. `CODEX_ALLOW_ECHO_EXECUTOR=true`가 켜져 있는지 확인
+1. `codex.allow_echo_executor=true`가 켜져 있는지 확인
 2. 꺼져 있어야 정상 경로(MCP client + codex tool 호출)로 실행됨
-3. `CODEX_MCP_COMMAND`, `CODEX_MCP_ARGS`가 정상인지 확인
+3. `codex.mcp_command`, `codex.mcp_args`가 정상인지 확인
 4. `/new`로 세션 초기화 후 다시 요청
 
 ### 그룹 채팅에서 메시지를 못 받을 때

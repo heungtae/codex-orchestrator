@@ -33,16 +33,47 @@ _DEFAULT_CONF_TEMPLATE = (
     "# Set this to enable user-based access control.\n"
     "# allowed_users = [123456789]\n"
     "\n"
+    "[telegram.polling]\n"
+    "poll_timeout = 30\n"
+    "loop_sleep_sec = 1\n"
+    "delete_webhook_on_start = true\n"
+    "drop_pending_updates = false\n"
+    "ignore_pending_updates_on_start = true\n"
+    "# allowed_chat_ids = [123456789, 987654321]\n"
+    "require_mcp_warmup = true\n"
+    "cancel_wait_timeout_sec = 5\n"
+    "\n"
+    "[codex]\n"
+    "mcp_command = \"npx\"\n"
+    "mcp_args = \"-y codex mcp-server\"\n"
+    "mcp_client_timeout_seconds = 360000\n"
+    "# agent_model = \"gpt-5\"\n"
+    "# agent_working_directory = \"~/develop/your-project\"\n"
+    "allow_echo_executor = false\n"
+    "mcp_direct_status = true\n"
+    "# mcp_status_cmd = \"bash -lc \\\"echo running=true,ready=true,pid=12345,uptime_sec=30\\\"\"\n"
+    "mcp_auto_detect_process = false\n"
+    "\n"
     "[profile]\n"
-    "# default = \"default\"\n"
+    "default = \"default\"\n"
     "\n"
     "[profiles.default]\n"
+    "model = \"gpt-5\"\n"
+    "working_directory = \"~/develop/your-project\"\n"
+    "\n"
+    "# Optional: global agent overrides.\n"
+    "# [agents.single.developer]\n"
+    "# model = \"gpt-5-codex\"\n"
+    "# system_prompt_file = \"./prompts/developer.txt\"\n"
+    "\n"
+    "# Optional: profile-specific overrides.\n"
+    "# [profiles.default.agents.single.reviewer]\n"
     "# model = \"gpt-5\"\n"
-    "# working_directory = \"~/develop/your-project\"\n"
+    "# system_prompt = \"You are Reviewer Agent. Focus on concrete diffs and risks.\"\n"
     "\n"
     "[profiles.bridge]\n"
-    "# model = \"gpt-5\"\n"
-    "# working_directory = \"~/develop/bridge-project\"\n"
+    "model = \"gpt-5\"\n"
+    "working_directory = \"~/develop/bridge-project\"\n"
 )
 _UNAUTHORIZED_MESSAGE = "Unauthorized"
 
@@ -52,6 +83,24 @@ class _AgentTextNotification:
     message_id: str
     phase: str
     text: str
+
+
+@dataclass(frozen=True)
+class _PollingConfig:
+    poll_timeout: int = 30
+    loop_sleep_sec: float = 1.0
+    delete_webhook_on_start: bool = True
+    drop_pending_updates: bool = False
+    ignore_pending_updates_on_start: bool = True
+    allowed_chat_ids: set[str] | None = None
+    require_mcp_warmup: bool = True
+    cancel_wait_timeout_sec: float = 5.0
+
+
+@dataclass(frozen=True)
+class _RunnerConfig:
+    allowed_users: set[str] | None
+    polling: _PollingConfig
 
 
 _ACTIVE_NOTIFICATION_HANDLER: contextvars.ContextVar[
@@ -295,13 +344,6 @@ def _configure_logging() -> None:
     logging.getLogger().addFilter(_CodexEventValidationFilter())
 
 
-def _parse_allowed_chat_ids(raw: str) -> set[str] | None:
-    value = raw.strip()
-    if not value:
-        return None
-    return {piece.strip() for piece in value.split(",") if piece.strip()}
-
-
 def _resolve_conf_path(raw_path: str | Path) -> Path:
     path = Path(raw_path).expanduser()
     if not path.is_absolute():
@@ -319,69 +361,170 @@ def _ensure_conf_exists(path: Path) -> None:
         raise ValueError(f"failed to create default conf file at {path}: {exc}") from exc
 
 
-def _load_allowed_users_from_conf(conf_path: str) -> set[str] | None:
-    path = _resolve_conf_path(conf_path)
-    _ensure_conf_exists(path)
-
+def _load_toml_payload(conf_path: Path) -> dict[str, Any]:
     try:
         import tomllib
     except Exception as exc:
         raise RuntimeError("Python 3.11+ is required for conf.toml parsing (tomllib).") from exc
 
     try:
-        payload = tomllib.loads(path.read_text(encoding="utf-8"))
+        payload = tomllib.loads(conf_path.read_text(encoding="utf-8"))
     except Exception as exc:
-        raise ValueError(f"failed to parse {path}: {exc}") from exc
+        raise ValueError(f"failed to parse {conf_path}: {exc}") from exc
 
+    if not isinstance(payload, dict):
+        raise ValueError(f"{conf_path}: root must be a table")
+    return payload
+
+
+def _optional_bool(*, value: Any, conf_path: Path, key_name: str, default: bool) -> bool:
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise ValueError(f"{conf_path}: {key_name} must be a boolean")
+    return value
+
+
+def _optional_positive_int(*, value: Any, conf_path: Path, key_name: str, default: int) -> int:
+    if value is None:
+        return default
+    if not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{conf_path}: {key_name} must be a positive integer")
+    return value
+
+
+def _optional_positive_float(*, value: Any, conf_path: Path, key_name: str, default: float) -> float:
+    if value is None:
+        return default
+    if not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError(f"{conf_path}: {key_name} must be a positive number")
+    return float(value)
+
+
+def _parse_id_allowlist(
+    *,
+    value: Any,
+    conf_path: Path,
+    key_name: str,
+    allow_csv_string: bool,
+) -> set[str] | None:
+    if value is None:
+        return None
+
+    if allow_csv_string and isinstance(value, str):
+        normalized = {piece.strip() for piece in value.split(",") if piece.strip()}
+        return normalized or None
+
+    if not isinstance(value, list):
+        raise ValueError(f"{conf_path}: {key_name} must be a list")
+
+    parsed: set[str] = set()
+    for item in value:
+        if isinstance(item, (int, str)):
+            normalized = str(item).strip()
+            if normalized:
+                parsed.add(normalized)
+            continue
+        raise ValueError(f"{conf_path}: {key_name} supports only int/string items")
+    return parsed or None
+
+
+def _parse_allowed_users_from_payload(*, payload: dict[str, Any], conf_path: Path) -> set[str] | None:
     telegram = payload.get("telegram")
     if telegram is None:
         return None
     if not isinstance(telegram, dict):
-        raise ValueError(f"{path}: [telegram] must be a table")
-
-    allowed_users = telegram.get("allowed_users")
-    if allowed_users is None:
-        return None
-    if not isinstance(allowed_users, list):
-        raise ValueError(f"{path}: telegram.allowed_users must be a list")
-
-    parsed: set[str] = set()
-    for item in allowed_users:
-        if isinstance(item, (int, str)):
-            user_id = str(item).strip()
-            if user_id:
-                parsed.add(user_id)
-            continue
-        raise ValueError(f"{path}: telegram.allowed_users supports only int/string items")
-
-    return parsed
+        raise ValueError(f"{conf_path}: [telegram] must be a table")
+    return _parse_id_allowlist(
+        value=telegram.get("allowed_users"),
+        conf_path=conf_path,
+        key_name="telegram.allowed_users",
+        allow_csv_string=False,
+    )
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    normalized = value.strip().lower()
-    return normalized in {"1", "true", "yes", "y", "on"}
+def _parse_polling_config_from_payload(
+    *,
+    payload: dict[str, Any],
+    conf_path: Path,
+) -> _PollingConfig:
+    telegram = payload.get("telegram")
+    if telegram is None:
+        return _PollingConfig()
+    if not isinstance(telegram, dict):
+        raise ValueError(f"{conf_path}: [telegram] must be a table")
+
+    polling = telegram.get("polling")
+    if polling is None:
+        return _PollingConfig()
+    if not isinstance(polling, dict):
+        raise ValueError(f"{conf_path}: [telegram.polling] must be a table")
+
+    return _PollingConfig(
+        poll_timeout=_optional_positive_int(
+            value=polling.get("poll_timeout"),
+            conf_path=conf_path,
+            key_name="telegram.polling.poll_timeout",
+            default=30,
+        ),
+        loop_sleep_sec=_optional_positive_float(
+            value=polling.get("loop_sleep_sec"),
+            conf_path=conf_path,
+            key_name="telegram.polling.loop_sleep_sec",
+            default=1.0,
+        ),
+        delete_webhook_on_start=_optional_bool(
+            value=polling.get("delete_webhook_on_start"),
+            conf_path=conf_path,
+            key_name="telegram.polling.delete_webhook_on_start",
+            default=True,
+        ),
+        drop_pending_updates=_optional_bool(
+            value=polling.get("drop_pending_updates"),
+            conf_path=conf_path,
+            key_name="telegram.polling.drop_pending_updates",
+            default=False,
+        ),
+        ignore_pending_updates_on_start=_optional_bool(
+            value=polling.get("ignore_pending_updates_on_start"),
+            conf_path=conf_path,
+            key_name="telegram.polling.ignore_pending_updates_on_start",
+            default=True,
+        ),
+        allowed_chat_ids=_parse_id_allowlist(
+            value=polling.get("allowed_chat_ids"),
+            conf_path=conf_path,
+            key_name="telegram.polling.allowed_chat_ids",
+            allow_csv_string=True,
+        ),
+        require_mcp_warmup=_optional_bool(
+            value=polling.get("require_mcp_warmup"),
+            conf_path=conf_path,
+            key_name="telegram.polling.require_mcp_warmup",
+            default=True,
+        ),
+        cancel_wait_timeout_sec=_optional_positive_float(
+            value=polling.get("cancel_wait_timeout_sec"),
+            conf_path=conf_path,
+            key_name="telegram.polling.cancel_wait_timeout_sec",
+            default=5.0,
+        ),
+    )
 
 
-def _env_float(name: str, default: float) -> float:
-    value = os.getenv(name)
-    if value is None:
-        return default
+def _load_runner_config_from_conf(conf_path: str) -> tuple[Path, _RunnerConfig]:
+    path = _resolve_conf_path(conf_path)
+    _ensure_conf_exists(path)
+    payload = _load_toml_payload(path)
+    return path, _RunnerConfig(
+        allowed_users=_parse_allowed_users_from_payload(payload=payload, conf_path=path),
+        polling=_parse_polling_config_from_payload(payload=payload, conf_path=path),
+    )
 
-    raw = value.strip()
-    if not raw:
-        return default
 
-    try:
-        parsed = float(raw)
-    except ValueError:
-        return default
-
-    if parsed <= 0:
-        return default
-    return parsed
+def _load_allowed_users_from_conf(conf_path: str) -> set[str] | None:
+    _, runner_conf = _load_runner_config_from_conf(conf_path)
+    return runner_conf.allowed_users
 
 
 def _safe_send(api: TelegramBotApi, chat_id: str, text: str) -> None:
@@ -601,7 +744,7 @@ def _format_mcp_status(status: dict[str, Any]) -> str:
 async def _warmup_codex_mcp(orchestrator: Any) -> bool:
     executor = _extract_executor(orchestrator)
     if isinstance(executor, EchoCodexExecutor):
-        _stdout_print("[warn] CODEX_ALLOW_ECHO_EXECUTOR=true (debug mode). mcp warmup is skipped.")
+        _stdout_print("[warn] codex.allow_echo_executor=true (debug mode). mcp warmup is skipped.")
         return False
 
     if not isinstance(executor, CodexMcpExecutor):
@@ -634,9 +777,8 @@ async def _close_codex_mcp(orchestrator: Any) -> None:
 
 async def _run_polling() -> None:
     conf_path = os.getenv("CODEX_CONF_PATH", str(_DEFAULT_CONF_PATH)).strip() or str(_DEFAULT_CONF_PATH)
-    conf_file = _resolve_conf_path(conf_path)
     try:
-        allowed_users = _load_allowed_users_from_conf(str(conf_file))
+        conf_file, runner_conf = _load_runner_config_from_conf(conf_path)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -644,21 +786,22 @@ async def _run_polling() -> None:
     if not token:
         raise SystemExit("TELEGRAM_BOT_TOKEN is required")
 
-    poll_timeout = int(os.getenv("TELEGRAM_POLL_TIMEOUT", "30"))
-    loop_sleep_sec = float(os.getenv("TELEGRAM_LOOP_SLEEP_SEC", "1"))
-    clear_webhook = _env_bool("TELEGRAM_DELETE_WEBHOOK_ON_START", True)
-    drop_pending = _env_bool("TELEGRAM_DROP_PENDING_UPDATES", False)
-    allowed_chat_ids = _parse_allowed_chat_ids(os.getenv("TELEGRAM_ALLOWED_CHAT_IDS", ""))
-    ignore_pending_updates_on_start = _env_bool("TELEGRAM_IGNORE_PENDING_UPDATES_ON_START", True)
+    allowed_users = runner_conf.allowed_users
+    polling = runner_conf.polling
+    poll_timeout = polling.poll_timeout
+    loop_sleep_sec = polling.loop_sleep_sec
+    clear_webhook = polling.delete_webhook_on_start
+    drop_pending = polling.drop_pending_updates
+    allowed_chat_ids = polling.allowed_chat_ids
+    ignore_pending_updates_on_start = polling.ignore_pending_updates_on_start
+    cancel_wait_timeout_sec = polling.cancel_wait_timeout_sec
+    require_mcp_warmup = polling.require_mcp_warmup
 
-    progress_notify = _env_bool("TELEGRAM_PROGRESS_NOTIFY", True)
-    progress_initial_delay_sec = _env_float("TELEGRAM_PROGRESS_INITIAL_DELAY_SEC", 15.0)
-    progress_interval_sec = _env_float("TELEGRAM_PROGRESS_INTERVAL_SEC", 20.0)
-    cancel_wait_timeout_sec = _env_float("TELEGRAM_CANCEL_WAIT_TIMEOUT_SEC", 5.0)
-    progress_message_template = os.getenv(
-        "TELEGRAM_PROGRESS_MESSAGE",
-        "still working... elapsed={elapsed_sec}s",
-    )
+    # Reserved for compatibility; synthetic progress messages are currently disabled.
+    progress_notify = True
+    progress_initial_delay_sec = 15.0
+    progress_interval_sec = 20.0
+    progress_message_template = "still working... elapsed={elapsed_sec}s"
 
     api = TelegramBotApi(token=token)
     _stdout_print(f"[info] conf file: {conf_file}")
@@ -689,13 +832,12 @@ async def _run_polling() -> None:
             except Exception as exc:
                 _stdout_print(f"[warn] failed to skip pending telegram updates on startup: {exc}")
 
-        require_mcp_warmup = _env_bool("TELEGRAM_REQUIRE_MCP_WARMUP", True)
         warmup_ok = await _warmup_codex_mcp(orchestrator)
         if require_mcp_warmup and not warmup_ok:
             raise SystemExit(
                 "codex mcp-server warmup failed. "
-                "Check CODEX_MCP_COMMAND/CODEX_MCP_ARGS and runtime auth settings, "
-                "or disable strict check with TELEGRAM_REQUIRE_MCP_WARMUP=false"
+                "Check conf.toml [codex].mcp_command/[codex].mcp_args and runtime auth settings, "
+                "or disable strict check with [telegram.polling].require_mcp_warmup=false"
             )
 
         _stdout_print("[info] telegram polling runner started")

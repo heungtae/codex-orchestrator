@@ -66,7 +66,7 @@ class BotOrchestrator:
                 detail = detail[:280] + "..."
             output_text = (
                 "Codex runtime configuration error. "
-                "Check MCP client installation and CODEX_MCP_COMMAND/CODEX_MCP_ARGS settings.\n"
+                "Check MCP client installation and conf.toml [codex].mcp_command/[codex].mcp_args settings.\n"
                 f"detail: {detail}"
             )
             error_message = str(exc)

@@ -12,6 +12,7 @@ from scripts.telegram_polling_runner import (
     _format_inbound_stdout,
     _is_cancel_command,
     _load_allowed_users_from_conf,
+    _load_runner_config_from_conf,
     _next_offset_from_updates,
     _run_polling,
     _resolve_conf_path,
@@ -200,6 +201,53 @@ allowed_users = "123456789"
             )
             with self.assertRaises(ValueError):
                 _load_allowed_users_from_conf(str(path))
+
+    def test_load_runner_config_from_conf_parses_polling_options(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "conf.toml"
+            path.write_text(
+                """
+[telegram]
+allowed_users = [123456789, "987654321"]
+
+[telegram.polling]
+poll_timeout = 15
+loop_sleep_sec = 0.5
+delete_webhook_on_start = false
+drop_pending_updates = true
+ignore_pending_updates_on_start = false
+allowed_chat_ids = [111111, "222222"]
+require_mcp_warmup = false
+cancel_wait_timeout_sec = 3
+""".strip(),
+                encoding="utf-8",
+            )
+
+            _, runner_conf = _load_runner_config_from_conf(str(path))
+
+            self.assertEqual(runner_conf.allowed_users, {"123456789", "987654321"})
+            self.assertEqual(runner_conf.polling.poll_timeout, 15)
+            self.assertEqual(runner_conf.polling.loop_sleep_sec, 0.5)
+            self.assertFalse(runner_conf.polling.delete_webhook_on_start)
+            self.assertTrue(runner_conf.polling.drop_pending_updates)
+            self.assertFalse(runner_conf.polling.ignore_pending_updates_on_start)
+            self.assertEqual(runner_conf.polling.allowed_chat_ids, {"111111", "222222"})
+            self.assertFalse(runner_conf.polling.require_mcp_warmup)
+            self.assertEqual(runner_conf.polling.cancel_wait_timeout_sec, 3.0)
+
+    def test_load_runner_config_from_conf_rejects_invalid_poll_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "conf.toml"
+            path.write_text(
+                """
+[telegram.polling]
+poll_timeout = "30"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError):
+                _load_runner_config_from_conf(str(path))
 
     def test_render_progress_message_uses_template(self) -> None:
         text = _render_progress_message(

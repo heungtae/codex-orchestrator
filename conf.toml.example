@@ -1,27 +1,60 @@
 [telegram]
 # Place this file at: ~/.codex-orchestrator/conf.toml
-# Allow only these Telegram `from_user.id` values.
-# Example:
-# allowed_users = [123456789, 987654321]
+# Allow only these Telegram `from_user.id` values (int or string).
+# Omit/comment this key to disable user allowlist.
+# Example: allowed_users = [123456789, "987654321"]
 allowed_users = [123456789]
 
+[telegram.polling]
+poll_timeout = 30
+loop_sleep_sec = 1
+delete_webhook_on_start = true
+drop_pending_updates = false
+ignore_pending_updates_on_start = true
+# allowed_chat_ids = [123456789, 987654321]
+require_mcp_warmup = true
+cancel_wait_timeout_sec = 5
+
+[codex]
+mcp_command = "npx"
+mcp_args = "-y codex mcp-server"
+mcp_client_timeout_seconds = 360000
+# agent_model = "gpt-5"
+# agent_working_directory = "~/develop/your-project"
+allow_echo_executor = false
+mcp_direct_status = true
+# mcp_status_cmd = "bash -lc \"echo running=true,ready=true,pid=12345,uptime_sec=30\""
+mcp_auto_detect_process = false
+
 [profile]
-# default = "default"
+# Default execution profile name.
+default = "default"
 
 [profiles.default]
-# model = "gpt-5"
-# working_directory = "~/develop/your-project"
+model = "gpt-5"
+working_directory = "~/develop/your-project"
 
-# Agent-specific overrides (optional)
+[profiles.bridge]
+model = "gpt-5"
+working_directory = "~/develop/bridge-project"
+
+# Global agent overrides (applies to all profiles unless overridden).
 # [agents.single.developer]
-# model = "gpt-5"
+# model = "gpt-5-codex"
 # system_prompt = "You are Developer Agent..."
-# system_prompt_file = "~/develop/prompts/developer.txt"
+# system_prompt_file = "./prompts/developer.txt"
 #
 # [agents.single.reviewer]
 # model = "gpt-5"
-# system_prompt_file = "~/develop/prompts/reviewer.txt"
+# system_prompt = "You are Reviewer Agent..."
 #
+# Multi role overrides.
+# Option A) Shared override for all multi roles:
+# [agents.multi]
+# model = "gpt-5"
+# system_prompt = "You are Multi Agent..."
+#
+# Option B) Per-role overrides (do not combine with [agents.multi]):
 # [agents.multi.designer]
 # model = "gpt-5"
 # system_prompt = "You are Multi Designer Agent..."
@@ -41,7 +74,3 @@ allowed_users = [123456789]
 # [agents.multi.manager]
 # model = "gpt-5"
 # system_prompt = "You are Multi Manager Agent..."
-
-[profiles.bridge]
-# model = "gpt-5"
-# working_directory = "~/develop/bridge-project"

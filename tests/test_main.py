@@ -18,12 +18,17 @@ class MainBuildOrchestratorTests(unittest.TestCase):
 
     def test_external_status_mode_can_be_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            env = {
-                "CODEX_CONF_PATH": str(Path(tmp) / "conf.toml"),
-                "CODEX_MCP_DIRECT_STATUS": "false",
-                "CODEX_MCP_STATUS_CMD": "echo running=true",
-                "CODEX_MCP_AUTO_DETECT_PROCESS": "true",
-            }
+            conf_path = Path(tmp) / "conf.toml"
+            conf_path.write_text(
+                """
+[codex]
+mcp_direct_status = false
+mcp_status_cmd = "echo running=true"
+mcp_auto_detect_process = true
+""".strip(),
+                encoding="utf-8",
+            )
+            env = {"CODEX_CONF_PATH": str(conf_path)}
             with patch.dict("os.environ", env, clear=True):
                 orchestrator = build_orchestrator()
 
