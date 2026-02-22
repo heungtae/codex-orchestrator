@@ -68,6 +68,14 @@ class OrchestratorTests(unittest.TestCase):
             self.assertIn("single_review: rounds=2/3, result=approved", status)
             self.assertIn("codex_mcp: running=true, ready=true, pid=12345", status)
 
+    def test_start_command_includes_session_working_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            orchestrator = self._build(Path(tmp))
+            orchestrator.working_directory = tmp
+
+            output = asyncio.run(orchestrator.handle_message("1", "2", "/start"))
+            self.assertIn(f"session_working_directory: {Path(tmp).resolve()}", output)
+
     def test_new_command_resets_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             orchestrator = self._build(Path(tmp))

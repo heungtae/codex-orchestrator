@@ -68,4 +68,5 @@ def build_orchestrator() -> BotOrchestrator:
         single_workflow=agent_factory.create_single_workflow(),
         multi_workflow=agent_factory.create_multi_workflow(),
         codex_mcp=codex_mcp,
+        working_directory=getattr(executor, "cwd", None),
     )

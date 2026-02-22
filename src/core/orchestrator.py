@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from core.command_router import CommandRouter
@@ -22,6 +23,7 @@ class BotOrchestrator:
     single_workflow: Workflow
     multi_workflow: Workflow
     codex_mcp: CodexMcpServer
+    working_directory: str | None = None
 
     async def handle_message(self, chat_id: str | int, user_id: str | int, text: str | None) -> str:
         run_id = str(uuid.uuid4())
@@ -98,7 +100,12 @@ class BotOrchestrator:
         route: RouteResult,
     ) -> tuple[str, str]:
         if route.command == "start":
-            return self._help_text(), "single"
+            return (
+                self._help_text(
+                    working_directory=self._resolve_working_directory(self.working_directory)
+                ),
+                "single",
+            )
 
         if route.command == "mode":
             mode = route.args[0] if route.args else ""
@@ -203,7 +210,7 @@ class BotOrchestrator:
             return None
 
     @staticmethod
-    def _help_text() -> str:
+    def _help_text(*, working_directory: str) -> str:
         return "\n".join(
             [
                 "available commands:",
@@ -213,8 +220,17 @@ class BotOrchestrator:
                 "/status",
                 "/codex /...",
                 "plain text is forwarded to Codex workflow",
+                f"session_working_directory: {working_directory}",
             ]
         )
+
+    @staticmethod
+    def _resolve_working_directory(raw_path: str | None) -> str:
+        if isinstance(raw_path, str):
+            candidate = raw_path.strip()
+            if candidate:
+                return str(Path(candidate).resolve())
+        return str(Path.cwd().resolve())
 
     @staticmethod
     def _format_status(session: BotSession, mcp_status: dict[str, Any] | None) -> str:
