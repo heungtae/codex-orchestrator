@@ -72,6 +72,10 @@ default = "bridge"
 model = "gpt-5"
 working_directory = "~/develop/ai-agent/codex-orchestrator"
 
+[agents.single.planner]
+model = "gpt-5"
+system_prompt = "You are Planner Agent. Build concise implementation handoff."
+
 [agents.single.developer]
 model = "gpt-5-codex"
 system_prompt_file = "./prompts/developer.txt"
@@ -108,6 +112,7 @@ working_directory = "~/develop/bridge-project"
 - `allowed_users` 키를 비워두거나 주석 처리하면 사용자 제한은 비활성화된다.
 - `/profile <name>` 전환 시 profile의 `model`, `working_directory`, agent별 override가 실행에 반영된다.
 - agent별 설정 키:
+  - `agents.single.planner`
   - `agents.single.developer`
   - `agents.single.reviewer`
   - `agents.multi.designer`
@@ -116,7 +121,7 @@ working_directory = "~/develop/bridge-project"
   - `agents.multi.tester`
   - `agents.multi.manager`
 - 현재 agent 이름:
-  - single 모드: `single.developer`, `single.reviewer`
+  - single 모드: `single.planner`, `single.developer`, `single.reviewer`
   - multi 모드(현재 placeholder 실행 우선순위): `multi.manager` -> `multi.designer` -> `multi.frontend.developer` -> `multi.backend.developer` -> `multi.tester`
 
 ## 4) 실행 방법 (Polling)
@@ -162,11 +167,13 @@ Telegram에서 생성한 bot과 대화를 시작한 뒤 아래처럼 사용한�
 - 그 외 `/...`는 Codex 슬래시 명령으로 전달
 
 ## 6) Single 모드 응답 이해
-single 모드는 Developer/Reviewer 반복 루프(최대 3회)로 동작한다.
+single 모드는 `Planner -> Developer -> Reviewer` 단계로 동작한다.
+- Planner가 구현 계획(handoff)을 생성한다.
+- Developer/Reviewer 단계는 리뷰 결과에 따라 최대 3회까지 반복된다.
 
 응답 끝에 아래 요약이 붙는다.
 ```text
-[single-review] rounds=2/3, result=approved
+[single-review] stages=planner>developer>reviewer, rounds=2/3, result=approved
 ```
 
 - `approved`: 리뷰 승인됨
@@ -200,7 +207,7 @@ single 모드는 Developer/Reviewer 반복 루프(최대 3회)로 동작한다.
 2. 프로세스가 보이지 않으면 orchestrator 기준으로는 실행 중이 아님
 3. 프로세스가 보이는데도 false면 `codex.mcp_status_cmd`를 명시해 강제 상태 조회 사용
 
-### 응답에 `You are Developer Agent...` 프롬프트가 반복될 때
+### 응답에 `You are ... Agent...` 프롬프트가 반복될 때
 1. `codex.allow_echo_executor=true`가 켜져 있는지 확인
 2. 꺼져 있어야 정상 경로(MCP client + codex tool 호출)로 실행됨
 3. `codex.mcp_command`, `codex.mcp_args`가 정상인지 확인

@@ -2,7 +2,7 @@
 
 ## 1) 목표
 - Telegram Bot 명령/메시지를 받아 Codex MCP tool 기반 워크플로우를 실행한다.
-- 1단계: `single` 모드에서 개발/검토 반복 루프 워크플로우를 구현한다.
+- 1단계: `single` 모드에서 `Planner -> Developer -> Reviewer` 워크플로우를 구현한다.
 - 2단계: `Expand to a multi-agent workflow`를 구현한다.
 - 동일한 Telegram 인터페이스에서 단일/다중 모드를 전환할 수 있게 한다.
 
@@ -57,13 +57,14 @@
   - Python에서는 `~`를 직접 경로로 쓰지 않고 `Path.home()` 기반으로 절대 경로 변환
 
 ### `src/workflows/agent_factory.py`
-- single 모드용 2-agent 루프(Developer/Reviewer)와 multi 모드 에이전트 트리(리드/서브) 생성.
+- single 모드용 3-stage 체인(Planner/Developer/Reviewer)과 multi 모드 에이전트 트리(리드/서브) 생성.
 - 공통 Codex executor 인스턴스 재사용.
 - 모델/프롬프트/가드레일을 중앙 관리.
 
 ### `src/workflows/single_agent_workflow.py`
-- `Developer Agent` + `Reviewer Agent` 2-agent 루프를 단일 모드 내부에서 실행.
+- `Planner Agent` + `Developer Agent` + `Reviewer Agent` 단계를 single 모드 내부에서 실행.
 - 한 번의 사용자 요청에서:
+  - Planner가 구현 계획(handoff) 생성
   - Developer가 구현/수정 수행
   - Reviewer가 결과 검토(버그, 누락, 리스크, 테스트 관점)
   - 수정 필요 시 Reviewer 피드백을 Developer에 재투입
@@ -103,7 +104,7 @@
 
 ## 5) 명령 계약 (v1)
 - `/start`: 사용법 안내
-- `/mode single`: single 모드(개발/검토 루프) 전환
+- `/mode single`: single 모드(planner/developer/reviewer) 전환
 - `/mode multi`: 다중 에이전트 모드 전환
 - `/new`: 해당 세션 대화/상태 초기화
 - `/status`: 현재 모드/최근 실행 상태 + Codex MCP 상태 출력
@@ -126,15 +127,16 @@ last_error: -
 ```
 
 ## 6) 워크플로우 상세
-### A. Single-mode (개발/검토 루프)
+### A. Single-mode (planner/developer/reviewer)
 1. 사용자가 메시지 입력
 2. Router가 입력 유형 판별 (예약 명령 | Codex 슬래시 명령 | 일반 텍스트)
 3. SessionManager가 현재 모드 확인 (신규 세션이면 `single`로 초기화)
-4. Developer Agent가 구현/수정 초안을 생성
-5. Reviewer Agent가 초안을 검토하고 승인 여부/수정 피드백 생성
-6. 미승인이고 반복 한도 미만이면 Reviewer 피드백을 Developer에 전달해 4~5 반복
-7. 승인 또는 반복 한도 도달 시 결과를 요약해 Telegram으로 반환
-8. history/state 저장
+4. Planner Agent가 요청 기반 구현 계획(handoff) 생성
+5. Developer Agent가 구현/수정 초안을 생성
+6. Reviewer Agent가 초안을 검토하고 승인 여부/수정 피드백 생성
+7. 미승인이고 반복 한도 미만이면 Reviewer 피드백을 Developer에 전달해 5~6 반복
+8. 승인 또는 반복 한도 도달 시 결과를 요약해 Telegram으로 반환
+9. history/state 저장
 
 ### B. Multi-agent
 1. 사용자 입력 수신
@@ -215,7 +217,7 @@ last_error: -
 
 ## 10) 구현 순서 제안
 1. `telegram_adapter` + `command_router` + `session_manager` 구현
-2. single 모드(개발/검토 루프) 워크플로우 연결
+2. single 모드(planner/developer/reviewer) 워크플로우 연결
 3. `/mode`, `/new`, `/status` 명령 완성
 4. Multi-agent(handoffs) 추가
 5. 관측성(로그/트레이싱) + 재시도/타임아웃 튜닝
@@ -263,4 +265,4 @@ class CodexMcpStatus(TypedDict, total=False):
 - history가 유지되어 연속 대화가 가능하다.
 - 운영 로그에서 요청-응답-에러 추적이 가능하다.
 - 일반 문장(슬래시 없음) 입력이 Codex로 전달되어 작업이 수행된다.
-- single 모드에서 개발/검토 루프가 반복되고, 승인 또는 최대 반복 도달 결과가 반환된다.
+- single 모드에서 planner 실행 후 developer/reviewer 루프가 반복되고, 승인 또는 최대 반복 도달 결과가 반환된다.

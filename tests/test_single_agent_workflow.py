@@ -3,6 +3,7 @@ import unittest
 
 from workflows.single_agent_workflow import (
     LlmDeveloperAgent,
+    LlmPlannerAgent,
     LlmReviewerAgent,
     SingleAgentWorkflow,
 )
@@ -27,6 +28,21 @@ class FakeDeveloper:
         if review_feedback:
             return f"draft-{round_index}-fixed"
         return f"draft-{round_index}"
+
+
+class FakePlanner:
+    def __init__(self, output: str = "1. inspect\n2. implement\n3. validate") -> None:
+        self.output = output
+        self.calls: list[str] = []
+
+    async def plan(
+        self,
+        *,
+        user_input: str,
+        session: BotSession,
+    ) -> str:
+        self.calls.append(user_input)
+        return self.output
 
 
 class FakeReviewer:
@@ -91,6 +107,7 @@ class SingleWorkflowTests(unittest.TestCase):
 
     def test_single_workflow_loops_until_approved(self) -> None:
         workflow = SingleAgentWorkflow(
+            planner=FakePlanner(),
             developer=FakeDeveloper(),
             reviewer=FakeReviewer(
                 decisions=[
@@ -110,6 +127,7 @@ class SingleWorkflowTests(unittest.TestCase):
 
     def test_single_workflow_stops_at_max_rounds(self) -> None:
         workflow = SingleAgentWorkflow(
+            planner=FakePlanner(),
             developer=FakeDeveloper(),
             reviewer=FakeReviewer(
                 decisions=[
@@ -131,6 +149,7 @@ class SingleWorkflowTests(unittest.TestCase):
     def test_single_workflow_fails_fast_on_prompt_echo(self) -> None:
         echo_executor = EchoCodexExecutor()
         workflow = SingleAgentWorkflow(
+            planner=LlmPlannerAgent(executor=echo_executor),
             developer=LlmDeveloperAgent(executor=echo_executor),
             reviewer=LlmReviewerAgent(executor=echo_executor),
             max_review_rounds=3,
@@ -142,6 +161,7 @@ class SingleWorkflowTests(unittest.TestCase):
     def test_single_workflow_skips_review_when_no_artifacts_detected(self) -> None:
         reviewer = FailIfCalledReviewer()
         workflow = SingleAgentWorkflow(
+            planner=FakePlanner(),
             developer=FakeDeveloper(),
             reviewer=reviewer,
             max_review_rounds=3,
@@ -157,6 +177,7 @@ class SingleWorkflowTests(unittest.TestCase):
 
     def test_history_is_sanitized_before_single_flow(self) -> None:
         workflow = SingleAgentWorkflow(
+            planner=FakePlanner(),
             developer=FakeDeveloper(),
             reviewer=FakeReviewer([ReviewDecision(result="approved", feedback="ok")]),
             max_review_rounds=3,
@@ -183,6 +204,7 @@ class SingleWorkflowTests(unittest.TestCase):
     def test_profile_model_and_working_directory_are_forwarded_to_executor(self) -> None:
         executor = CapturingExecutor()
         workflow = SingleAgentWorkflow(
+            planner=LlmPlannerAgent(executor=executor),
             developer=LlmDeveloperAgent(executor=executor),
             reviewer=LlmReviewerAgent(executor=executor),
             max_review_rounds=3,
@@ -194,7 +216,7 @@ class SingleWorkflowTests(unittest.TestCase):
 
         asyncio.run(workflow.run("request", session))
 
-        self.assertTrue(len(executor.calls) >= 2)
+        self.assertTrue(len(executor.calls) >= 3)
         for call in executor.calls:
             self.assertEqual(call["model"], "gpt-5")
             self.assertEqual(call["cwd"], "/tmp/bridge")
@@ -217,11 +239,14 @@ class SingleWorkflowTests(unittest.TestCase):
                     {"model": model, "cwd": cwd, "system_instructions": system_instructions}
                 )
                 if len(self.calls) == 1:
+                    return "plan output"
+                if len(self.calls) == 2:
                     return "developer output"
                 return '{"result":"approved","feedback":"ok"}'
 
         executor = OverrideExecutor()
         workflow = SingleAgentWorkflow(
+            planner=LlmPlannerAgent(executor=executor),
             developer=LlmDeveloperAgent(executor=executor),
             reviewer=LlmReviewerAgent(executor=executor),
             max_review_rounds=3,
@@ -231,28 +256,57 @@ class SingleWorkflowTests(unittest.TestCase):
         session.profile_model = "gpt-5"
         session.profile_working_directory = "/tmp/bridge"
         session.profile_agent_models = {
+            "single.planner": "gpt-5-plan",
             "single.developer": "gpt-5-dev",
             "single.reviewer": "gpt-5-review",
         }
         session.profile_agent_system_prompts = {
+            "single.planner": "Planner custom system prompt",
             "single.developer": "Developer custom system prompt",
             "single.reviewer": "Reviewer custom system prompt",
         }
 
         asyncio.run(workflow.run("request", session))
 
-        self.assertGreaterEqual(len(executor.calls), 2)
-        self.assertEqual(executor.calls[0]["model"], "gpt-5-dev")
+        self.assertGreaterEqual(len(executor.calls), 3)
+        self.assertEqual(executor.calls[0]["model"], "gpt-5-plan")
         self.assertEqual(executor.calls[0]["cwd"], "/tmp/bridge")
         self.assertEqual(
             executor.calls[0]["system_instructions"],
-            "Developer custom system prompt",
+            "Planner custom system prompt",
         )
-        self.assertEqual(executor.calls[1]["model"], "gpt-5-review")
+        self.assertEqual(executor.calls[1]["model"], "gpt-5-dev")
         self.assertEqual(executor.calls[1]["cwd"], "/tmp/bridge")
         self.assertEqual(
             executor.calls[1]["system_instructions"],
+            "Developer custom system prompt",
+        )
+        self.assertEqual(executor.calls[2]["model"], "gpt-5-review")
+        self.assertEqual(executor.calls[2]["cwd"], "/tmp/bridge")
+        self.assertEqual(
+            executor.calls[2]["system_instructions"],
             "Reviewer custom system prompt",
+        )
+
+    def test_single_workflow_records_stage_transitions(self) -> None:
+        workflow = SingleAgentWorkflow(
+            planner=FakePlanner("plan"),
+            developer=FakeDeveloper(),
+            reviewer=FakeReviewer([ReviewDecision(result="approved", feedback="ok")]),
+            max_review_rounds=3,
+            review_only_with_artifacts=False,
+        )
+
+        result = asyncio.run(workflow.run("request", self._session()))
+
+        metadata = result.get("metadata", {})
+        transitions = metadata.get("stage_transitions", [])
+        self.assertTrue(any(item.get("from") == "start" and item.get("to") == "planner" for item in transitions))
+        self.assertTrue(
+            any(item.get("from") == "planner" and item.get("to") == "developer" for item in transitions)
+        )
+        self.assertTrue(
+            any(item.get("from") == "developer" and item.get("to") == "reviewer" for item in transitions)
         )
 
 

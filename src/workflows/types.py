@@ -12,6 +12,16 @@ class ReviewDecision:
     feedback: str
 
 
+class PlannerAgent(Protocol):
+    async def plan(
+        self,
+        *,
+        user_input: str,
+        session: BotSession,
+    ) -> str:
+        ...
+
+
 class DeveloperAgent(Protocol):
     async def develop(
         self,

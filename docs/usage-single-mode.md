@@ -1,11 +1,11 @@
-# Codex Orchestrator 사용법 (Single 우선)
+# Codex Orchestrator 사용법 (Single 전용)
 
 Telegram 연동부터 실제 채팅 운영 절차까지는 `docs/telegram-integration-runbook.md`를 참고하세요.
 
 ## 1. 현재 구현 범위
 - Python 기반 오케스트레이터 핵심 로직 구현 완료
 - `single` 모드 기본값 적용
-- 명령 라우팅: `/start`, `/mode`, `/new`, `/status`, `/cancel`, 그 외 `/...`, 일반 텍스트
+- 명령 라우팅: `/start`, `/mode single`, `/new`, `/status`, `/cancel`, 그 외 `/...`, 일반 텍스트
 - 세션 파일 저장, trace 로그 저장, Codex MCP 상태 조회 포함
 - 참고: Telegram long polling 실행 스크립트(`scripts/telegram_polling_runner.py`)가 포함되어 있으며, `BotOrchestrator.handle_message()`로도 동일 로직을 직접 호출할 수 있습니다.
 
@@ -67,32 +67,16 @@ default = "bridge"
 model = "gpt-5"
 working_directory = "~/develop/ai-agent/codex-orchestrator"
 
+[agents.single.planner]
+model = "gpt-5"
+system_prompt = "You are Planner Agent. Build concise implementation handoff."
+
 [agents.single.developer]
 model = "gpt-5-codex"
 system_prompt_file = "./prompts/developer.txt"
 
 [agents.single.reviewer]
 system_prompt = "You are Reviewer Agent. Focus on concrete diffs and risks."
-
-[agents.multi.designer]
-model = "gpt-5"
-system_prompt = "You are Multi Designer Agent."
-
-[agents.multi.frontend.developer]
-model = "gpt-5"
-system_prompt = "You are Multi Frontend Developer Agent."
-
-[agents.multi.backend.developer]
-model = "gpt-5"
-system_prompt = "You are Multi Backend Developer Agent."
-
-[agents.multi.tester]
-model = "gpt-5"
-system_prompt = "You are Multi Tester Agent."
-
-[agents.multi.manager]
-model = "gpt-5"
-system_prompt = "You are Multi Manager Agent."
 
 [profiles.bridge]
 model = "gpt-5"
@@ -102,19 +86,14 @@ working_directory = "~/develop/bridge-project"
 - `allowed_users` 설정 시 목록에 없는 Telegram 사용자는 `Unauthorized` 응답 후 차단됩니다.
 - `/profile <name>`으로 프로파일을 전환하면 `model`/`working_directory`와 agent별 override가 함께 적용됩니다.
 - agent별 설정 키:
+  - `agents.single.planner`
   - `agents.single.developer`
   - `agents.single.reviewer`
-  - `agents.multi.designer`
-  - `agents.multi.frontend.developer`
-  - `agents.multi.backend.developer`
-  - `agents.multi.tester`
-  - `agents.multi.manager`
 - 현재 agent 이름:
-  - single 모드: `single.developer`, `single.reviewer`
-  - multi 모드(현재 placeholder 실행 우선순위): `multi.manager` -> `multi.designer` -> `multi.frontend.developer` -> `multi.backend.developer` -> `multi.tester`
+  - single 모드: `single.planner`, `single.developer`, `single.reviewer`
 - agent별 값이 없으면 기본값을 사용합니다.
   - model 기본값: `profiles.<name>.model`
-  - system prompt 기본값: single은 내장 기본 프롬프트, multi는 미지정
+  - system prompt 기본값: single은 내장 기본 프롬프트
 
 주의:
 - 실행 경로는 MCP client + `codex` MCP tool 직접 호출입니다.
@@ -138,26 +117,27 @@ PY
 
 ## 4. 명령 사용법
 - `/start`: 사용 가능한 명령 안내
-- `/mode single|multi`: 모드 전환
+- `/mode single`: single 모드로 전환
 - `/new`: 현재 `chat_id:user_id` 세션 초기화 (모드도 `single`로 리셋)
-- `/status`: 현재 모드, 최근 실행 결과, single 리뷰 상태, codex_mcp 상태 출력
+- `/status`: single 모드 상태, 최근 실행 결과, single 리뷰 상태, codex_mcp 상태 출력
 - `/cancel`: 현재 세션에서 실행 중인 요청 취소
 - `/profile list|<name>`: 프로파일 목록 조회/전환
-- 일반 텍스트: 현재 모드 워크플로우로 즉시 전달
+- 일반 텍스트: single 워크플로우로 즉시 전달
 
 라우팅 규칙:
 - 예약 명령(`/start`, `/mode`, `/new`, `/status`, `/cancel`, `/profile`)만 내부 처리
 - 그 외 `/...`는 Codex 슬래시 명령으로 전달
 
 ## 5. Single 모드 동작
-Single 모드는 Developer/Reviewer 반복 루프입니다.
-1. Developer가 초안 생성
-2. Reviewer가 승인(`approved`) 또는 수정요청(`needs_changes`) 판단
-3. 수정요청이면 Developer가 반영 후 재검토
-4. 최대 3회 반복 후 종료
+Single 모드는 `Planner -> Developer -> Reviewer` 단계로 동작합니다.
+1. Planner가 사용자 요청 기준의 구현 계획(handoff)을 생성
+2. Developer가 계획과 요청을 기반으로 구현/수정 수행
+3. Reviewer가 승인(`approved`) 또는 수정요청(`needs_changes`) 판단
+4. 수정요청이면 Reviewer 피드백을 반영해 Developer/Reviewer 단계를 반복
+5. 승인 또는 최대 3회 반복 시 종료
 
 최종 응답에 아래 요약이 포함됩니다.
-- `[single-review] rounds=<n>/3, result=<approved|max_rounds_reached>`
+- `[single-review] stages=planner>developer>reviewer, rounds=<n>/3, result=<approved|max_rounds_reached>`
 
 ## 6. 상태/로그 파일
 ### 6.1 Session 파일

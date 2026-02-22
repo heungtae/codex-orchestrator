@@ -38,6 +38,11 @@ model = "gpt-5"
 working_directory = "~/develop/bridge-project"
 
 # Global agent overrides (applies to all profiles unless overridden).
+# [agents.single.planner]
+# model = "gpt-5"
+# system_prompt = "You are Planner Agent..."
+# system_prompt_file = "./prompts/planner.txt"
+#
 # [agents.single.developer]
 # model = "gpt-5-codex"
 # system_prompt = "You are Developer Agent..."

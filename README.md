@@ -5,6 +5,7 @@ Telegram Bot에서 Codex 워크플로우(single/multi)를 실행하기 위한 Py
 ## 주요 기능
 - Telegram long polling 기반 요청 처리
 - `/mode`, `/profile`, `/cancel` 등 운영 명령 라우팅
+- single 모드 `planner -> developer -> reviewer` 단계 실행(리뷰 최대 3회 반복)
 - 사용자 허용 목록(`telegram.allowed_users`) 기반 접근 제어
 - Codex MCP warmup 및 상태 확인
 - 세션/트레이스 파일 저장
@@ -120,5 +121,4 @@ PYTHONPATH=src python3 -m unittest -q tests.test_telegram_polling_runner
 ## 추가 문서
 - `docs/telegram-integration-runbook.md`: Telegram 연동/운영 절차
 - `docs/usage-single-mode.md`: single 모드 중심 사용 가이드
-
 
