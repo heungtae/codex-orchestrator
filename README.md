@@ -24,6 +24,35 @@ Telegram Bot에서 Codex 워크플로우(single/multi)를 실행하기 위한 Py
 - Telegram Bot 토큰
 
 ## 설치
+기본 설치:
+```bash
+python3 -m pip install codex_orchestrator
+```
+
+Ubuntu/Debian 계열에서 아래 오류가 발생할 수 있습니다.
+`error: externally-managed-environment`
+
+오류 발생 시 설치 방법 1 (사용자 계정 설치):
+```bash
+python3 -m pip install --user --break-system-packages codex_orchestrator
+```
+
+`--user`로 설치하면 실행 파일이 `~/.local/bin`에 설치됩니다. PATH 설정:
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+hash -r
+```
+
+오류 발생 시 설치 방법 2 (가상환경 설치):
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -U pip
+python3 -m pip install codex_orchestrator
+```
+
+개발 환경에서 로컬 소스를 직접 실행할 때:
 ```bash
 python3 -m pip install mcp python-dotenv
 ```
@@ -50,6 +79,17 @@ cp conf.toml.example ~/.codex-orchestrator/conf.toml
 - 상대 경로 `working_directory`와 `system_prompt_file`은 conf 파일 위치 기준으로 해석됩니다.
 
 ## 실행
+PyPI 설치 기준:
+```bash
+codex-orchestrator-polling
+```
+
+`command not found`가 나오면:
+```bash
+~/.local/bin/codex-orchestrator-polling
+```
+
+로컬 소스 실행 기준:
 ```bash
 PYTHONPATH=src python3 scripts/telegram_polling_runner.py
 ```
