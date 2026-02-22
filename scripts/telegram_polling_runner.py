@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from bot.telegram_adapter import parse_update, split_telegram_text
@@ -16,6 +20,16 @@ from integrations.codex_executor import (
     EchoCodexExecutor,
 )
 from main import build_orchestrator
+
+_BLOCKING_POOL = ThreadPoolExecutor(max_workers=8)
+_DEFAULT_CONF_PATH = Path.home() / ".codex-orchestrator" / "conf.toml"
+_DEFAULT_CONF_TEMPLATE = (
+    "[telegram]\n"
+    "# Telegram from_user.id allowlist (int or string).\n"
+    "# Set this to enable user-based access control.\n"
+    "# allowed_users = [123456789]\n"
+)
+_UNAUTHORIZED_MESSAGE = "Unauthorized"
 
 
 @dataclass
@@ -102,6 +116,61 @@ def _parse_allowed_chat_ids(raw: str) -> set[str] | None:
     return {piece.strip() for piece in value.split(",") if piece.strip()}
 
 
+def _resolve_conf_path(raw_path: str | Path) -> Path:
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path.resolve()
+
+
+def _ensure_conf_exists(path: Path) -> None:
+    if path.exists():
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_DEFAULT_CONF_TEMPLATE, encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"failed to create default conf file at {path}: {exc}") from exc
+
+
+def _load_allowed_users_from_conf(conf_path: str) -> set[str] | None:
+    path = _resolve_conf_path(conf_path)
+    _ensure_conf_exists(path)
+
+    try:
+        import tomllib
+    except Exception as exc:
+        raise RuntimeError("Python 3.11+ is required for conf.toml parsing (tomllib).") from exc
+
+    try:
+        payload = tomllib.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"failed to parse {path}: {exc}") from exc
+
+    telegram = payload.get("telegram")
+    if telegram is None:
+        return None
+    if not isinstance(telegram, dict):
+        raise ValueError(f"{path}: [telegram] must be a table")
+
+    allowed_users = telegram.get("allowed_users")
+    if allowed_users is None:
+        return None
+    if not isinstance(allowed_users, list):
+        raise ValueError(f"{path}: telegram.allowed_users must be a list")
+
+    parsed: set[str] = set()
+    for item in allowed_users:
+        if isinstance(item, (int, str)):
+            user_id = str(item).strip()
+            if user_id:
+                parsed.add(user_id)
+            continue
+        raise ValueError(f"{path}: telegram.allowed_users supports only int/string items")
+
+    return parsed
+
+
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -110,12 +179,86 @@ def _env_bool(name: str, default: bool) -> bool:
     return normalized in {"1", "true", "yes", "y", "on"}
 
 
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    raw = value.strip()
+    if not raw:
+        return default
+
+    try:
+        parsed = float(raw)
+    except ValueError:
+        return default
+
+    if parsed <= 0:
+        return default
+    return parsed
+
+
 def _safe_send(api: TelegramBotApi, chat_id: str, text: str) -> None:
     for chunk in split_telegram_text(text):
         try:
             api.send_message(chat_id=chat_id, text=chunk)
         except Exception as exc:
             print(f"[warn] failed to send telegram message: {exc}")
+
+
+async def _run_blocking(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+    loop = asyncio.get_running_loop()
+    bound = functools.partial(func, *args, **kwargs)
+    return await loop.run_in_executor(_BLOCKING_POOL, bound)
+
+
+def _render_progress_message(
+    *,
+    template: str,
+    elapsed_sec: int,
+    progress_count: int,
+) -> str:
+    try:
+        rendered = template.format(elapsed_sec=elapsed_sec, progress_count=progress_count).strip()
+        if rendered:
+            return rendered
+    except Exception:
+        pass
+    return f"still working... elapsed={elapsed_sec}s"
+
+
+async def _run_with_progress_notifications(
+    *,
+    orchestrator: Any,
+    api: TelegramBotApi,
+    chat_id: str,
+    user_id: str,
+    text: str,
+    enabled: bool,
+    initial_delay_sec: float,
+    interval_sec: float,
+    message_template: str,
+) -> str:
+    run_task = asyncio.create_task(orchestrator.handle_message(chat_id, user_id, text))
+    if not enabled:
+        return await run_task
+
+    started = time.monotonic()
+    progress_count = 0
+
+    while True:
+        timeout = initial_delay_sec if progress_count == 0 else interval_sec
+        try:
+            return await asyncio.wait_for(asyncio.shield(run_task), timeout=timeout)
+        except asyncio.TimeoutError:
+            progress_count += 1
+            elapsed_sec = int(time.monotonic() - started)
+            progress_message = _render_progress_message(
+                template=message_template,
+                elapsed_sec=elapsed_sec,
+                progress_count=progress_count,
+            )
+            await _run_blocking(_safe_send, api, chat_id, progress_message)
 
 
 def _extract_executor(orchestrator: Any) -> Any | None:
@@ -170,6 +313,13 @@ async def _close_codex_mcp(orchestrator: Any) -> None:
 
 
 async def _run_polling() -> None:
+    conf_path = os.getenv("CODEX_CONF_PATH", str(_DEFAULT_CONF_PATH)).strip() or str(_DEFAULT_CONF_PATH)
+    conf_file = _resolve_conf_path(conf_path)
+    try:
+        allowed_users = _load_allowed_users_from_conf(str(conf_file))
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         raise SystemExit("TELEGRAM_BOT_TOKEN is required")
@@ -180,10 +330,24 @@ async def _run_polling() -> None:
     drop_pending = _env_bool("TELEGRAM_DROP_PENDING_UPDATES", False)
     allowed_chat_ids = _parse_allowed_chat_ids(os.getenv("TELEGRAM_ALLOWED_CHAT_IDS", ""))
 
+    progress_notify = _env_bool("TELEGRAM_PROGRESS_NOTIFY", True)
+    progress_initial_delay_sec = _env_float("TELEGRAM_PROGRESS_INITIAL_DELAY_SEC", 15.0)
+    progress_interval_sec = _env_float("TELEGRAM_PROGRESS_INTERVAL_SEC", 20.0)
+    progress_message_template = os.getenv(
+        "TELEGRAM_PROGRESS_MESSAGE",
+        "still working... elapsed={elapsed_sec}s",
+    )
+
     api = TelegramBotApi(token=token)
+    print(f"[info] conf file: {conf_file}")
+    if allowed_users is not None:
+        print(f"[info] telegram user allowlist enabled: count={len(allowed_users)}")
+    else:
+        print("[info] telegram user allowlist disabled (telegram.allowed_users not set)")
+
     if clear_webhook:
         try:
-            await asyncio.to_thread(api.delete_webhook, drop_pending_updates=drop_pending)
+            await _run_blocking(api.delete_webhook, drop_pending_updates=drop_pending)
         except Exception as exc:
             print(f"[warn] failed to delete webhook on startup: {exc}")
 
@@ -202,7 +366,7 @@ async def _run_polling() -> None:
         print("[info] telegram polling runner started")
         while True:
             try:
-                updates = await asyncio.to_thread(
+                updates = await _run_blocking(
                     api.get_updates,
                     offset=next_offset,
                     timeout=poll_timeout,
@@ -216,20 +380,35 @@ async def _run_polling() -> None:
                     if not inbound:
                         continue
 
+                    if allowed_users is not None and inbound.user_id not in allowed_users:
+                        await _run_blocking(
+                            _safe_send,
+                            api,
+                            inbound.chat_id,
+                            _UNAUTHORIZED_MESSAGE,
+                        )
+                        continue
+
                     if allowed_chat_ids is not None and inbound.chat_id not in allowed_chat_ids:
-                        await asyncio.to_thread(_safe_send, api, inbound.chat_id, "not allowed chat")
+                        await _run_blocking(_safe_send, api, inbound.chat_id, "not allowed chat")
                         continue
 
                     try:
-                        output = await orchestrator.handle_message(
-                            inbound.chat_id,
-                            inbound.user_id,
-                            inbound.text,
+                        output = await _run_with_progress_notifications(
+                            orchestrator=orchestrator,
+                            api=api,
+                            chat_id=inbound.chat_id,
+                            user_id=inbound.user_id,
+                            text=inbound.text,
+                            enabled=progress_notify,
+                            initial_delay_sec=progress_initial_delay_sec,
+                            interval_sec=progress_interval_sec,
+                            message_template=progress_message_template,
                         )
                     except Exception as exc:
                         output = f"internal error: {exc}"
 
-                    await asyncio.to_thread(_safe_send, api, inbound.chat_id, output)
+                    await _run_blocking(_safe_send, api, inbound.chat_id, output)
             except Exception as exc:
                 print(f"[warn] polling loop error: {exc}")
 

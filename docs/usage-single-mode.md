@@ -5,7 +5,7 @@ Telegram 연동부터 실제 채팅 운영 절차까지는 `docs/telegram-integr
 ## 1. 현재 구현 범위
 - Python 기반 오케스트레이터 핵심 로직 구현 완료
 - `single` 모드 기본값 적용
-- 명령 라우팅: `/start`, `/mode`, `/new`, `/status`, `/codex /...`, 일반 텍스트
+- 명령 라우팅: `/start`, `/mode`, `/new`, `/status`, 그 외 `/...`, 일반 텍스트
 - 세션 파일 저장, trace 로그 저장, Codex MCP 상태 조회 포함
 - 참고: Telegram long polling 실행 스크립트(`scripts/telegram_polling_runner.py`)가 포함되어 있으며, `BotOrchestrator.handle_message()`로도 동일 로직을 직접 호출할 수 있습니다.
 
@@ -33,9 +33,22 @@ PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py' -q
 - `CODEX_AGENT_MODEL`: Codex 모델 오버라이드(선택)
 - `CODEX_MCP_STATUS_CMD`: MCP 상태 조회 명령
 - `CODEX_ALLOW_ECHO_EXECUTOR`: `true`일 때만 Echo 실행기 허용(디버그 전용)
+- `CODEX_CONF_PATH`: 사용자 허용 목록 conf 파일 경로(기본 `~/.codex-orchestrator/conf.toml`)
+- `TELEGRAM_PROGRESS_NOTIFY`: polling runner 장시간 요청 진행 알림 활성화(기본 `true`)
+- `TELEGRAM_PROGRESS_INITIAL_DELAY_SEC`: 첫 진행 알림 대기 시간(기본 `15`)
+- `TELEGRAM_PROGRESS_INTERVAL_SEC`: 진행 알림 주기(기본 `20`)
+- `TELEGRAM_PROGRESS_MESSAGE`: 진행 알림 템플릿(기본 `still working... elapsed={elapsed_sec}s`)
 
 설정하지 않으면:
 - MCP 상태는 `ps` 기반으로 `codex mcp-server` 프로세스를 자동 탐지 시도
+
+`conf.toml` 예시:
+```toml
+[telegram]
+allowed_users = [123456789]
+```
+- 기본 경로(`~/.codex-orchestrator/conf.toml`) 파일이 없으면 runner 최초 실행 시 자동 생성됩니다.
+- `allowed_users` 설정 시 목록에 없는 Telegram 사용자는 `Unauthorized` 응답 후 차단됩니다.
 
 예시:
 ```bash
@@ -69,13 +82,11 @@ PY
 - `/mode single|multi`: 모드 전환
 - `/new`: 현재 `chat_id:user_id` 세션 초기화 (모드도 `single`로 리셋)
 - `/status`: 현재 모드, 최근 실행 결과, single 리뷰 상태, codex_mcp 상태 출력
-- `/codex /...`: 슬래시 명령을 Codex로 강제 전달
 - 일반 텍스트: 현재 모드 워크플로우로 즉시 전달
 
 라우팅 규칙:
 - 예약 명령(`/start`, `/mode`, `/new`, `/status`)만 내부 처리
 - 그 외 `/...`는 Codex 슬래시 명령으로 전달
-- `/codex` 단독 입력 시 `usage: /codex /...` 반환
 
 ## 5. Single 모드 동작
 Single 모드는 Developer/Reviewer 반복 루프입니다.

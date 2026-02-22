@@ -26,10 +26,10 @@ class CommandRouterTests(unittest.TestCase):
         self.assertEqual(route.kind, "codex_slash")
         self.assertEqual(route.text, "/edit add textbox")
 
-    def test_codex_prefix_forces_forwarding(self) -> None:
+    def test_codex_literal_is_forwarded_as_non_reserved_slash(self) -> None:
         route = self.router.route("/codex /status")
         self.assertEqual(route.kind, "codex_slash")
-        self.assertEqual(route.text, "/status")
+        self.assertEqual(route.text, "/codex /status")
 
     def test_plain_text_is_forwarded(self) -> None:
         route = self.router.route("add a textbox to the file")

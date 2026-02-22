@@ -11,10 +11,6 @@ class CommandRouter:
         if not raw:
             return RouteResult(kind="text", text="")
 
-        if raw.startswith("/codex"):
-            payload = raw[len("/codex") :].strip()
-            return RouteResult(kind="codex_slash", text=payload)
-
         if raw.startswith("/"):
             parts = raw.split()
             command = parts[0].lower()

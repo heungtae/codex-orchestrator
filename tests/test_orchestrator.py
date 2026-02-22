@@ -90,11 +90,11 @@ class OrchestratorTests(unittest.TestCase):
             status_after = asyncio.run(orchestrator.handle_message("1", "2", "/status"))
             self.assertIn("mode: single", status_after)
 
-    def test_empty_codex_prefix_returns_usage(self) -> None:
+    def test_codex_literal_is_forwarded_to_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             orchestrator = self._build(Path(tmp))
             response = asyncio.run(orchestrator.handle_message("1", "2", "/codex"))
-            self.assertEqual(response, "usage: /codex /...")
+            self.assertEqual(response, "single:/codex")
 
     def test_codex_execution_error_returns_configuration_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

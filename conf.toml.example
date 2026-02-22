@@ -1,0 +1,6 @@
+[telegram]
+# Place this file at: ~/.codex-orchestrator/conf.toml
+# Allow only these Telegram `from_user.id` values.
+# Example:
+# allowed_users = [123456789, 987654321]
+allowed_users = [123456789]

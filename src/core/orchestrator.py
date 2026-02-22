@@ -43,8 +43,6 @@ class BotOrchestrator:
                     user_id=user_id,
                     route=route,
                 )
-            elif route.kind == "codex_slash" and not route.text:
-                output_text = "usage: /codex /..."
             else:
                 (
                     output_text,
@@ -218,8 +216,7 @@ class BotOrchestrator:
                 "/mode single|multi",
                 "/new",
                 "/status",
-                "/codex /...",
-                "plain text is forwarded to Codex workflow",
+                "non-reserved /... and plain text are forwarded to Codex workflow",
                 f"session_working_directory: {working_directory}",
             ]
         )
