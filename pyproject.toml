@@ -23,7 +23,16 @@ classifiers = [
   "Topic :: Software Development :: Libraries",
   "Topic :: Communications :: Chat",
 ]
-keywords = ["codex", "telegram", "orchestrator", "mcp", "agent"]
+keywords = [
+  "codex",
+  "telegram",
+  "orchestrator",
+  "mcp",
+  "agent",
+  "vibe coding",
+  "codex cli",
+  "codex mcp-server",
+]
 
 [project.scripts]
 codex-orchestrator = "scripts.telegram_polling_runner:main"
