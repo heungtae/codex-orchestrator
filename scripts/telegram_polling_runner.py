@@ -39,7 +39,6 @@ _DEFAULT_CONF_TEMPLATE = (
     "delete_webhook_on_start = true\n"
     "drop_pending_updates = false\n"
     "ignore_pending_updates_on_start = true\n"
-    "# allowed_chat_ids = [123456789, 987654321]\n"
     "require_mcp_warmup = true\n"
     "cancel_wait_timeout_sec = 5\n"
     "\n"
@@ -94,7 +93,6 @@ class _PollingConfig:
     delete_webhook_on_start: bool = True
     drop_pending_updates: bool = False
     ignore_pending_updates_on_start: bool = True
-    allowed_chat_ids: set[str] | None = None
     require_mcp_warmup: bool = True
     cancel_wait_timeout_sec: float = 5.0
 
@@ -493,12 +491,6 @@ def _parse_polling_config_from_payload(
             key_name="telegram.polling.ignore_pending_updates_on_start",
             default=True,
         ),
-        allowed_chat_ids=_parse_id_allowlist(
-            value=polling.get("allowed_chat_ids"),
-            conf_path=conf_path,
-            key_name="telegram.polling.allowed_chat_ids",
-            allow_csv_string=True,
-        ),
         require_mcp_warmup=_optional_bool(
             value=polling.get("require_mcp_warmup"),
             conf_path=conf_path,
@@ -794,7 +786,6 @@ async def _run_polling() -> None:
     loop_sleep_sec = polling.loop_sleep_sec
     clear_webhook = polling.delete_webhook_on_start
     drop_pending = polling.drop_pending_updates
-    allowed_chat_ids = polling.allowed_chat_ids
     ignore_pending_updates_on_start = polling.ignore_pending_updates_on_start
     cancel_wait_timeout_sec = polling.cancel_wait_timeout_sec
     require_mcp_warmup = polling.require_mcp_warmup
@@ -884,10 +875,6 @@ async def _run_polling() -> None:
                             inbound.chat_id,
                             _UNAUTHORIZED_MESSAGE,
                         )
-                        continue
-
-                    if allowed_chat_ids is not None and inbound.chat_id not in allowed_chat_ids:
-                        await _run_blocking(_safe_send, api, inbound.chat_id, "not allowed chat")
                         continue
 
                     if _is_cancel_command(inbound.text):

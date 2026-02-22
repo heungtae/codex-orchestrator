@@ -216,7 +216,6 @@ loop_sleep_sec = 0.5
 delete_webhook_on_start = false
 drop_pending_updates = true
 ignore_pending_updates_on_start = false
-allowed_chat_ids = [111111, "222222"]
 require_mcp_warmup = false
 cancel_wait_timeout_sec = 3
 """.strip(),
@@ -231,7 +230,6 @@ cancel_wait_timeout_sec = 3
             self.assertFalse(runner_conf.polling.delete_webhook_on_start)
             self.assertTrue(runner_conf.polling.drop_pending_updates)
             self.assertFalse(runner_conf.polling.ignore_pending_updates_on_start)
-            self.assertEqual(runner_conf.polling.allowed_chat_ids, {"111111", "222222"})
             self.assertFalse(runner_conf.polling.require_mcp_warmup)
             self.assertEqual(runner_conf.polling.cancel_wait_timeout_sec, 3.0)
 

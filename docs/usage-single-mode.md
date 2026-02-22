@@ -5,7 +5,7 @@ Telegram 연동부터 실제 채팅 운영 절차까지는 `docs/telegram-integr
 ## 1. 현재 구현 범위
 - Python 기반 오케스트레이터 핵심 로직 구현 완료
 - `single` 모드 기본값 적용
-- 명령 라우팅: `/start`, `/mode single`, `/new`, `/status`, `/cancel`, 그 외 `/...`, 일반 텍스트
+- 명령 라우팅: `/start`, `/mode single`, `/new`, `/status`, `/cancel`, 그 외 일반 텍스트
 - 세션 파일 저장, trace 로그 저장, Codex MCP 상태 조회 포함
 - 참고: Telegram long polling 실행 스크립트(`scripts/telegram_polling_runner.py`)가 포함되어 있으며, `BotOrchestrator.handle_message()`로도 동일 로직을 직접 호출할 수 있습니다.
 
@@ -43,7 +43,6 @@ loop_sleep_sec = 1
 delete_webhook_on_start = true
 drop_pending_updates = false
 ignore_pending_updates_on_start = true
-# allowed_chat_ids = [123456789, 987654321]
 require_mcp_warmup = true
 cancel_wait_timeout_sec = 5
 

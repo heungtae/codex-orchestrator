@@ -11,7 +11,6 @@ loop_sleep_sec = 1
 delete_webhook_on_start = true
 drop_pending_updates = false
 ignore_pending_updates_on_start = true
-# allowed_chat_ids = [123456789, 987654321]
 require_mcp_warmup = true
 cancel_wait_timeout_sec = 5
 
