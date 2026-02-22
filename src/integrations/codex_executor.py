@@ -40,6 +40,7 @@ class CodexMcpExecutor:
     approval_policy: str = "never"
     sandbox: str = "workspace-write"
     cwd: str | None = None
+    close_timeout_seconds: float = 2.0
 
     _startup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _session: Any | None = field(default=None, init=False, repr=False)
@@ -78,6 +79,12 @@ class CodexMcpExecutor:
 
         try:
             result = await self._session.call_tool("codex", payload)
+        except asyncio.CancelledError:
+            # Ensure transport/session context managers are closed in the same task
+            # where they were entered to avoid AnyIO cancel-scope task affinity errors.
+            await self._cleanup_after_cancel()
+            self._set_status(stopped=True, error="request cancelled")
+            raise
         except Exception as exc:
             await self._reset_after_transport_error(str(exc))
             raise CodexExecutionError(f"failed to call mcp tool 'codex': {exc}") from exc
@@ -94,6 +101,26 @@ class CodexMcpExecutor:
     async def warmup(self) -> None:
         """Eagerly start MCP stdio transport and initialize the session."""
         await self._ensure_started()
+
+    async def _cleanup_after_cancel(self) -> None:
+        current_task = asyncio.current_task()
+        uncancel_count = 0
+        if current_task is not None and hasattr(current_task, "uncancel"):
+            while current_task.cancelling():
+                current_task.uncancel()
+                uncancel_count += 1
+
+        try:
+            await self.close()
+        except Exception:
+            self._session = None
+            self._session_cm = None
+            self._stdio_cm = None
+            self._started = False
+        finally:
+            if current_task is not None:
+                for _ in range(uncancel_count):
+                    current_task.cancel()
 
     async def _reset_after_transport_error(self, error_message: str) -> None:
         # If the transport/session has broken, force a fresh connection on next run.
@@ -113,20 +140,46 @@ class CodexMcpExecutor:
             if not self._started:
                 return
 
-            try:
-                if self._session_cm is not None:
-                    await self._session_cm.__aexit__(None, None, None)
-            finally:
-                self._session = None
-                self._session_cm = None
+            session_close_error: Exception | None = None
+            stdio_close_error: Exception | None = None
 
-            try:
-                if self._stdio_cm is not None:
-                    await self._stdio_cm.__aexit__(None, None, None)
-            finally:
-                self._stdio_cm = None
-                self._started = False
-                self._set_status(stopped=True)
+            if self._session_cm is not None:
+                try:
+                    await asyncio.wait_for(
+                        self._session_cm.__aexit__(None, None, None),
+                        timeout=self.close_timeout_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    session_close_error = RuntimeError(
+                        "codex mcp session close timed out "
+                        f"after {self.close_timeout_seconds:.1f}s"
+                    )
+                except Exception as exc:
+                    session_close_error = exc
+            self._session = None
+            self._session_cm = None
+
+            if self._stdio_cm is not None:
+                try:
+                    await asyncio.wait_for(
+                        self._stdio_cm.__aexit__(None, None, None),
+                        timeout=self.close_timeout_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    stdio_close_error = RuntimeError(
+                        "codex mcp stdio close timed out "
+                        f"after {self.close_timeout_seconds:.1f}s"
+                    )
+                except Exception as exc:
+                    stdio_close_error = exc
+            self._stdio_cm = None
+            self._started = False
+            self._set_status(stopped=True)
+
+            if stdio_close_error is not None:
+                raise stdio_close_error
+            if session_close_error is not None:
+                raise session_close_error
 
     async def _ensure_started(self) -> None:
         if self._started:

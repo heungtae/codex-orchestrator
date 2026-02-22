@@ -68,6 +68,33 @@ default = "bridge"
 model = "gpt-5"
 working_directory = "~/develop/ai-agent/codex-orchestrator"
 
+[agents.single.developer]
+model = "gpt-5-codex"
+system_prompt_file = "./prompts/developer.txt"
+
+[agents.single.reviewer]
+system_prompt = "You are Reviewer Agent. Focus on concrete diffs and risks."
+
+[agents.multi.designer]
+model = "gpt-5"
+system_prompt = "You are Multi Designer Agent."
+
+[agents.multi.frontend.developer]
+model = "gpt-5"
+system_prompt = "You are Multi Frontend Developer Agent."
+
+[agents.multi.backend.developer]
+model = "gpt-5"
+system_prompt = "You are Multi Backend Developer Agent."
+
+[agents.multi.tester]
+model = "gpt-5"
+system_prompt = "You are Multi Tester Agent."
+
+[agents.multi.manager]
+model = "gpt-5"
+system_prompt = "You are Multi Manager Agent."
+
 [profiles.bridge]
 model = "gpt-5"
 working_directory = "~/develop/bridge-project"
@@ -75,7 +102,18 @@ working_directory = "~/develop/bridge-project"
 
 - `allowed_users`가 설정되면 목록에 없는 `from_user.id`는 `Unauthorized` 응답 후 요청이 차단된다.
 - `allowed_users` 키를 비워두거나 주석 처리하면 사용자 제한은 비활성화된다.
-- `/profile <name>` 전환 시 profile의 `model`, `working_directory`가 실행에 반영된다.
+- `/profile <name>` 전환 시 profile의 `model`, `working_directory`, agent별 override가 실행에 반영된다.
+- agent별 설정 키:
+  - `agents.single.developer`
+  - `agents.single.reviewer`
+  - `agents.multi.designer`
+  - `agents.multi.frontend.developer`
+  - `agents.multi.backend.developer`
+  - `agents.multi.tester`
+  - `agents.multi.manager`
+- 현재 agent 이름:
+  - single 모드: `single.developer`, `single.reviewer`
+  - multi 모드(현재 placeholder 실행 우선순위): `multi.manager` -> `multi.designer` -> `multi.frontend.developer` -> `multi.backend.developer` -> `multi.tester`
 
 ## 4) 실행 방법 (Polling)
 이 레포에는 long polling 실행 스크립트가 포함되어 있다.
@@ -108,6 +146,7 @@ Telegram에서 생성한 bot과 대화를 시작한 뒤 아래처럼 사용한�
 ### 5.1 기본 확인
 - `/start`: 사용 가능한 명령 확인
 - `/status`: 현재 모드/프로파일/최근 실행/single 리뷰/codex_mcp 상태 확인
+- `/cancel`: 현재 세션에서 실행 중인 요청 취소
 
 ### 5.2 모드 제어
 - `/mode single`: single 모드 전환 (기본값)
@@ -124,7 +163,7 @@ Telegram에서 생성한 bot과 대화를 시작한 뒤 아래처럼 사용한�
 - `로그인 API 에러 원인 분석해줘`
 
 슬래시 입력 규칙:
-- 예약 명령(`/start`, `/mode`, `/new`, `/status`, `/profile`)은 bot이 직접 처리
+- 예약 명령(`/start`, `/mode`, `/new`, `/status`, `/cancel`, `/profile`)은 bot이 직접 처리
 - 그 외 `/...`는 Codex 슬래시 명령으로 전달
 
 ## 6) Single 모드 응답 이해

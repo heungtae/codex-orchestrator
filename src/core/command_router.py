@@ -13,7 +13,8 @@ class CommandRouter:
 
         if raw.startswith("/"):
             parts = raw.split()
-            command = parts[0].lower()
+            command_token = parts[0].lower()
+            command = command_token.split("@", 1)[0]
 
             if command == "/start":
                 return RouteResult(kind="bot_command", text=raw, command="start")
@@ -41,6 +42,9 @@ class CommandRouter:
                     command="profile",
                     args=(profile_arg,),
                 )
+
+            if command == "/cancel":
+                return RouteResult(kind="bot_command", text=raw, command="cancel")
 
             return RouteResult(kind="codex_slash", text=raw)
 

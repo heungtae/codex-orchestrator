@@ -199,6 +199,62 @@ class SingleWorkflowTests(unittest.TestCase):
             self.assertEqual(call["model"], "gpt-5")
             self.assertEqual(call["cwd"], "/tmp/bridge")
 
+    def test_agent_specific_model_and_system_prompt_overrides_are_forwarded(self) -> None:
+        class OverrideExecutor:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, str | None]] = []
+
+            async def run(
+                self,
+                prompt: str,
+                history=None,
+                *,
+                system_instructions=None,
+                model=None,
+                cwd=None,
+            ) -> str:
+                self.calls.append(
+                    {"model": model, "cwd": cwd, "system_instructions": system_instructions}
+                )
+                if len(self.calls) == 1:
+                    return "developer output"
+                return '{"result":"approved","feedback":"ok"}'
+
+        executor = OverrideExecutor()
+        workflow = SingleAgentWorkflow(
+            developer=LlmDeveloperAgent(executor=executor),
+            reviewer=LlmReviewerAgent(executor=executor),
+            max_review_rounds=3,
+            review_only_with_artifacts=False,
+        )
+        session = self._session()
+        session.profile_model = "gpt-5"
+        session.profile_working_directory = "/tmp/bridge"
+        session.profile_agent_models = {
+            "single.developer": "gpt-5-dev",
+            "single.reviewer": "gpt-5-review",
+        }
+        session.profile_agent_system_prompts = {
+            "single.developer": "Developer custom system prompt",
+            "single.reviewer": "Reviewer custom system prompt",
+        }
+
+        asyncio.run(workflow.run("request", session))
+
+        self.assertGreaterEqual(len(executor.calls), 2)
+        self.assertEqual(executor.calls[0]["model"], "gpt-5-dev")
+        self.assertEqual(executor.calls[0]["cwd"], "/tmp/bridge")
+        self.assertEqual(
+            executor.calls[0]["system_instructions"],
+            "Developer custom system prompt",
+        )
+        self.assertEqual(executor.calls[1]["model"], "gpt-5-review")
+        self.assertEqual(executor.calls[1]["cwd"], "/tmp/bridge")
+        self.assertEqual(
+            executor.calls[1]["system_instructions"],
+            "Reviewer custom system prompt",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

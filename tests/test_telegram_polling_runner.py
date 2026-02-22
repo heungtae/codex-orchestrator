@@ -8,12 +8,16 @@ from unittest.mock import patch
 from scripts.telegram_polling_runner import (
     _ACTIVE_NOTIFICATION_HANDLER,
     _CodexEventValidationFilter,
+    _cancel_inflight_request,
+    _format_inbound_stdout,
+    _is_cancel_command,
     _load_allowed_users_from_conf,
     _next_offset_from_updates,
     _run_polling,
     _resolve_conf_path,
     _render_progress_message,
     _run_with_progress_notifications,
+    _wait_for_request_completion,
 )
 
 
@@ -35,7 +39,106 @@ class _SlowOrchestrator:
         return self.output
 
 
+class _TrackingOrchestrator:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def handle_message(self, chat_id: str, user_id: str, text: str) -> str:
+        self.calls += 1
+        return "done"
+
+
 class TelegramPollingRunnerProgressTests(unittest.TestCase):
+    def test_cancel_inflight_request_cancels_task(self) -> None:
+        class _DummyOrchestrator:
+            pass
+
+        async def _never() -> None:
+            await asyncio.sleep(30)
+
+        async def _scenario() -> bool:
+            task = asyncio.create_task(_never())
+            await asyncio.sleep(0)
+            cancelled = await _cancel_inflight_request(
+                orchestrator=_DummyOrchestrator(),
+                request_task=task,
+            )
+            self.assertTrue(task.done())
+            self.assertTrue(task.cancelled())
+            return cancelled
+
+        self.assertTrue(asyncio.run(_scenario()))
+
+    def test_wait_for_request_completion_returns_true_when_task_done(self) -> None:
+        async def _done() -> None:
+            return None
+
+        async def _scenario() -> bool:
+            task = asyncio.create_task(_done())
+            await task
+            return await _wait_for_request_completion(request_task=task, timeout_sec=0.1)
+
+        self.assertTrue(asyncio.run(_scenario()))
+
+    def test_wait_for_request_completion_times_out_for_running_task(self) -> None:
+        async def _never() -> None:
+            await asyncio.sleep(30)
+
+        async def _scenario() -> bool:
+            task = asyncio.create_task(_never())
+            timed_out = await _wait_for_request_completion(request_task=task, timeout_sec=0.01)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            return timed_out
+
+        self.assertFalse(asyncio.run(_scenario()))
+
+    def test_is_cancel_command_parses_plain_and_mention_forms(self) -> None:
+        self.assertTrue(_is_cancel_command("/cancel"))
+        self.assertTrue(_is_cancel_command("/cancel   "))
+        self.assertTrue(_is_cancel_command("/cancel@my_bot"))
+        self.assertFalse(_is_cancel_command("/status"))
+        self.assertFalse(_is_cancel_command("cancel"))
+
+    def test_format_inbound_stdout_escapes_newlines(self) -> None:
+        rendered = _format_inbound_stdout(
+            chat_id="100",
+            user_id="200",
+            text="line1\nline2\rline3",
+        )
+        self.assertEqual(
+            rendered,
+            "[telegram-inbound] chat_id=100 user_id=200 text=line1\\nline2\\rline3",
+        )
+
+    def test_process_inbound_request_closes_mcp_session(self) -> None:
+        orchestrator = _TrackingOrchestrator()
+        api = _FakeTelegramApi()
+
+        async def _scenario() -> None:
+            with patch("scripts.telegram_polling_runner._close_codex_mcp") as mocked_close:
+                await _process_inbound_request(
+                    orchestrator=orchestrator,
+                    api=api,
+                    chat_id="100",
+                    user_id="200",
+                    text="hello",
+                    progress_notify=True,
+                    progress_initial_delay_sec=0.1,
+                    progress_interval_sec=0.1,
+                    progress_message_template="working {elapsed_sec}s",
+                )
+                mocked_close.assert_called_once_with(orchestrator)
+
+        from scripts.telegram_polling_runner import _process_inbound_request
+
+        asyncio.run(_scenario())
+        self.assertEqual(orchestrator.calls, 1)
+        self.assertEqual(api.messages, [("100", "done")])
+
     def test_run_polling_creates_conf_before_token_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             conf_path = Path(tmp) / "first-run-conf.toml"

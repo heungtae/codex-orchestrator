@@ -6,7 +6,7 @@ from typing import Any, Literal, TypedDict
 
 BotMode = Literal["single", "multi"]
 InputKind = Literal["bot_command", "codex_slash", "text"]
-BotCommandName = Literal["start", "mode", "new", "status", "profile"]
+BotCommandName = Literal["start", "mode", "new", "status", "profile", "cancel"]
 ReviewResult = Literal["approved", "needs_changes", "max_rounds_reached"]
 RunStatus = Literal["idle", "ok", "error"]
 
@@ -39,6 +39,8 @@ class BotSession:
     profile_name: str = "default"
     profile_model: str | None = None
     profile_working_directory: str | None = None
+    profile_agent_models: dict[str, str] = field(default_factory=dict)
+    profile_agent_system_prompts: dict[str, str] = field(default_factory=dict)
     updated_at: str = field(default_factory=utc_now_iso)
 
     def touch(self) -> None:
@@ -60,6 +62,8 @@ class BotSession:
             "profile_name": self.profile_name,
             "profile_model": self.profile_model,
             "profile_working_directory": self.profile_working_directory,
+            "profile_agent_models": self.profile_agent_models,
+            "profile_agent_system_prompts": self.profile_agent_system_prompts,
             "updated_at": self.updated_at,
         }
 
@@ -88,6 +92,8 @@ class BotSession:
         profile_working_directory = payload.get("profile_working_directory")
         if profile_working_directory is not None:
             profile_working_directory = str(profile_working_directory).strip() or None
+        profile_agent_models = _parse_string_map(payload.get("profile_agent_models"))
+        profile_agent_system_prompts = _parse_string_map(payload.get("profile_agent_system_prompts"))
 
         return cls(
             session_id=str(payload["session_id"]),
@@ -104,8 +110,28 @@ class BotSession:
             profile_name=profile_name,
             profile_model=profile_model,
             profile_working_directory=profile_working_directory,
+            profile_agent_models=profile_agent_models,
+            profile_agent_system_prompts=profile_agent_system_prompts,
             updated_at=str(payload.get("updated_at", utc_now_iso())),
         )
+
+
+def _parse_string_map(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+
+    parsed: dict[str, str] = {}
+    for raw_key, raw_val in value.items():
+        key = str(raw_key).strip().lower()
+        if not key:
+            continue
+        if raw_val is None:
+            continue
+        cleaned = str(raw_val).strip()
+        if not cleaned:
+            continue
+        parsed[key] = cleaned
+    return parsed
 
 
 class WorkflowResult(TypedDict, total=False):

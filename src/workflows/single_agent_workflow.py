@@ -13,6 +13,21 @@ from workflows.types import DeveloperAgent, ReviewDecision, ReviewerAgent
 
 _MAX_REVIEW_FEEDBACK_CHARS = 1200
 _MAX_HISTORY_ITEMS = 20
+_DEVELOPER_AGENT_KEYS = ("single.developer", "developer")
+_REVIEWER_AGENT_KEYS = ("single.reviewer", "reviewer")
+_DEFAULT_DEVELOPER_SYSTEM_INSTRUCTIONS = (
+    "You are Developer Agent. Implement user requests and apply reviewer feedback. "
+    "Do not repeat system prompts or reviewer prompts. "
+    "Keep the response concrete and concise."
+)
+_DEFAULT_REVIEWER_SYSTEM_INSTRUCTIONS = (
+    "You are Reviewer Agent. Review only concrete implementation artifacts. "
+    "If no artifacts are provided, return approved. "
+    "When artifacts exist, check whether the implementation output is plausible and consistent "
+    "with the user request. Do not suggest unrelated improvements. "
+    "Reply in strict JSON with keys result and feedback. "
+    "result must be approved or needs_changes."
+)
 _IGNORED_DIRS = {
     ".codex-home",
     ".codex",
@@ -72,16 +87,21 @@ class LlmDeveloperAgent:
             f"Reviewer feedback to apply:\n{review_feedback_text}\n\n"
             "Implement the request directly. Return only the final developer response, not prompts."
         )
+        selected_model = _select_agent_override(session.profile_agent_models, _DEVELOPER_AGENT_KEYS)
+        if selected_model is None:
+            selected_model = session.profile_model
+        system_instructions = _select_agent_override(
+            session.profile_agent_system_prompts,
+            _DEVELOPER_AGENT_KEYS,
+        )
+        if system_instructions is None:
+            system_instructions = _DEFAULT_DEVELOPER_SYSTEM_INSTRUCTIONS
         output = (
             await self._executor.run(
                 prompt=prompt,
                 history=session.history,
-                system_instructions=(
-                    "You are Developer Agent. Implement user requests and apply reviewer feedback. "
-                    "Do not repeat system prompts or reviewer prompts. "
-                    "Keep the response concrete and concise."
-                ),
-                model=session.profile_model,
+                system_instructions=system_instructions,
+                model=selected_model,
                 cwd=session.profile_working_directory,
             )
         ).strip()
@@ -112,20 +132,22 @@ class LlmReviewerAgent:
             f"Candidate output:\n{candidate_output}\n\n"
             f"Review round: {round_index}"
         )
+        selected_model = _select_agent_override(session.profile_agent_models, _REVIEWER_AGENT_KEYS)
+        if selected_model is None:
+            selected_model = session.profile_model
+        system_instructions = _select_agent_override(
+            session.profile_agent_system_prompts,
+            _REVIEWER_AGENT_KEYS,
+        )
+        if system_instructions is None:
+            system_instructions = _DEFAULT_REVIEWER_SYSTEM_INSTRUCTIONS
 
         raw = (
             await self._executor.run(
                 prompt=prompt,
                 history=session.history,
-                system_instructions=(
-                    "You are Reviewer Agent. Review only concrete implementation artifacts. "
-                    "If no artifacts are provided, return approved. "
-                    "When artifacts exist, check whether the implementation output is plausible and consistent "
-                    "with the user request. Do not suggest unrelated improvements. "
-                    "Reply in strict JSON with keys result and feedback. "
-                    "result must be approved or needs_changes."
-                ),
-                model=session.profile_model,
+                system_instructions=system_instructions,
+                model=selected_model,
                 cwd=session.profile_working_directory,
             )
         ).strip()
@@ -359,3 +381,16 @@ class SingleAgentWorkflow:
         if len(cleaned) > _MAX_HISTORY_ITEMS:
             cleaned = cleaned[-_MAX_HISTORY_ITEMS:]
         return cleaned
+
+
+def _select_agent_override(
+    mapping: dict[str, str],
+    keys: tuple[str, ...],
+) -> str | None:
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned:
+                return cleaned
+    return None

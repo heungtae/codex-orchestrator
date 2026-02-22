@@ -12,6 +12,36 @@ allowed_users = [123456789]
 # model = "gpt-5"
 # working_directory = "~/develop/your-project"
 
+# Agent-specific overrides (optional)
+# [agents.single.developer]
+# model = "gpt-5"
+# system_prompt = "You are Developer Agent..."
+# system_prompt_file = "~/develop/prompts/developer.txt"
+#
+# [agents.single.reviewer]
+# model = "gpt-5"
+# system_prompt_file = "~/develop/prompts/reviewer.txt"
+#
+# [agents.multi.designer]
+# model = "gpt-5"
+# system_prompt = "You are Multi Designer Agent..."
+#
+# [agents.multi.frontend.developer]
+# model = "gpt-5"
+# system_prompt = "You are Multi Frontend Developer Agent..."
+#
+# [agents.multi.backend.developer]
+# model = "gpt-5"
+# system_prompt = "You are Multi Backend Developer Agent..."
+#
+# [agents.multi.tester]
+# model = "gpt-5"
+# system_prompt = "You are Multi Tester Agent..."
+#
+# [agents.multi.manager]
+# model = "gpt-5"
+# system_prompt = "You are Multi Manager Agent..."
+
 [profiles.bridge]
 # model = "gpt-5"
 # working_directory = "~/develop/bridge-project"

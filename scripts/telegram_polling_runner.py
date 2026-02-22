@@ -408,6 +408,20 @@ def _render_progress_message(
     return f"still working... elapsed={elapsed_sec}s"
 
 
+def _is_cancel_command(text: str | None) -> bool:
+    raw = (text or "").strip()
+    if not raw.startswith("/"):
+        return False
+
+    command = raw.split(maxsplit=1)[0].lower()
+    return command == "/cancel" or command.startswith("/cancel@")
+
+
+def _format_inbound_stdout(*, chat_id: str, user_id: str, text: str) -> str:
+    escaped_text = text.replace("\r", "\\r").replace("\n", "\\n")
+    return f"[telegram-inbound] chat_id={chat_id} user_id={user_id} text={escaped_text}"
+
+
 async def _run_with_progress_notifications(
     *,
     orchestrator: Any,
@@ -445,14 +459,104 @@ async def _run_with_progress_notifications(
     global _ACTIVE_NOTIFICATION_HANDLER_FALLBACK
     callback_token = _ACTIVE_NOTIFICATION_HANDLER.set(_forward_intermediate)
     _ACTIVE_NOTIFICATION_HANDLER_FALLBACK = _forward_intermediate
-    run_task = asyncio.create_task(orchestrator.handle_message(chat_id, user_id, text))
 
     try:
-        return await run_task
+        return await orchestrator.handle_message(chat_id, user_id, text)
     finally:
         _ACTIVE_NOTIFICATION_HANDLER.reset(callback_token)
         if _ACTIVE_NOTIFICATION_HANDLER_FALLBACK is _forward_intermediate:
             _ACTIVE_NOTIFICATION_HANDLER_FALLBACK = None
+
+
+async def _process_inbound_request(
+    *,
+    orchestrator: Any,
+    api: TelegramBotApi,
+    chat_id: str,
+    user_id: str,
+    text: str,
+    progress_notify: bool,
+    progress_initial_delay_sec: float,
+    progress_interval_sec: float,
+    progress_message_template: str,
+) -> None:
+    try:
+        output = await _run_with_progress_notifications(
+            orchestrator=orchestrator,
+            api=api,
+            chat_id=chat_id,
+            user_id=user_id,
+            text=text,
+            enabled=progress_notify,
+            initial_delay_sec=progress_initial_delay_sec,
+            interval_sec=progress_interval_sec,
+            message_template=progress_message_template,
+        )
+    except Exception as exc:
+        output = f"internal error: {exc}"
+    finally:
+        try:
+            await _close_codex_mcp(orchestrator)
+        except Exception as exc:
+            print(f"[warn] failed to close codex mcp session after request: {exc}")
+
+    await _run_blocking(_safe_send, api, chat_id, output)
+
+
+async def _cancel_inflight_request(
+    *,
+    orchestrator: Any,
+    request_task: asyncio.Task[None] | None,
+) -> bool:
+    del orchestrator
+    if request_task is None:
+        return False
+    if request_task.done():
+        try:
+            request_task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            print(f"[warn] request task finished with error before cancel: {exc}")
+        return False
+
+    request_task.cancel()
+    try:
+        await request_task
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        print(f"[warn] request task failed while cancelling: {exc}")
+    return True
+
+
+async def _wait_for_request_completion(
+    *,
+    request_task: asyncio.Task[None] | None,
+    timeout_sec: float,
+) -> bool:
+    if request_task is None:
+        return True
+
+    if request_task.done():
+        try:
+            request_task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            print(f"[warn] request task failed after cancel: {exc}")
+        return True
+
+    try:
+        await asyncio.wait_for(asyncio.shield(request_task), timeout=timeout_sec)
+        return True
+    except asyncio.TimeoutError:
+        return False
+    except asyncio.CancelledError:
+        return True
+    except Exception as exc:
+        print(f"[warn] request task failed after cancel: {exc}")
+        return True
 
 
 def _extract_executor(orchestrator: Any) -> Any | None:
@@ -489,6 +593,9 @@ async def _warmup_codex_mcp(orchestrator: Any) -> bool:
         await executor.warmup()
         status = orchestrator.codex_mcp.get_status()
         print(f"[info] codex mcp-server connected: {_format_mcp_status(status)}")
+        # Keep request task affinity stable by not retaining an opened MCP session
+        # from startup task. Each inbound request opens/closes its own session.
+        await executor.close()
         return True
     except Exception as exc:
         print(f"[error] codex mcp-server connection failed: {exc}")
@@ -528,6 +635,7 @@ async def _run_polling() -> None:
     progress_notify = _env_bool("TELEGRAM_PROGRESS_NOTIFY", True)
     progress_initial_delay_sec = _env_float("TELEGRAM_PROGRESS_INITIAL_DELAY_SEC", 15.0)
     progress_interval_sec = _env_float("TELEGRAM_PROGRESS_INTERVAL_SEC", 20.0)
+    cancel_wait_timeout_sec = _env_float("TELEGRAM_CANCEL_WAIT_TIMEOUT_SEC", 5.0)
     progress_message_template = os.getenv(
         "TELEGRAM_PROGRESS_MESSAGE",
         "still working... elapsed={elapsed_sec}s",
@@ -547,6 +655,7 @@ async def _run_polling() -> None:
             print(f"[warn] failed to delete webhook on startup: {exc}")
 
     orchestrator = build_orchestrator()
+    active_request_task: asyncio.Task[None] | None = None
     try:
         next_offset: int | None = None
         if ignore_pending_updates_on_start:
@@ -572,6 +681,15 @@ async def _run_polling() -> None:
 
         print("[info] telegram polling runner started")
         while True:
+            if active_request_task is not None and active_request_task.done():
+                try:
+                    active_request_task.result()
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    print(f"[warn] request task failed: {exc}")
+                active_request_task = None
+
             try:
                 updates = await _run_blocking(
                     api.get_updates,
@@ -587,6 +705,15 @@ async def _run_polling() -> None:
                     if not inbound:
                         continue
 
+                    print(
+                        _format_inbound_stdout(
+                            chat_id=inbound.chat_id,
+                            user_id=inbound.user_id,
+                            text=inbound.text,
+                        ),
+                        flush=True,
+                    )
+
                     if allowed_users is not None and inbound.user_id not in allowed_users:
                         await _run_blocking(
                             _safe_send,
@@ -600,28 +727,77 @@ async def _run_polling() -> None:
                         await _run_blocking(_safe_send, api, inbound.chat_id, "not allowed chat")
                         continue
 
-                    try:
-                        output = await _run_with_progress_notifications(
+                    if _is_cancel_command(inbound.text):
+                        try:
+                            output = await orchestrator.handle_message(
+                                inbound.chat_id,
+                                inbound.user_id,
+                                "/cancel",
+                            )
+                        except Exception as exc:
+                            output = f"internal error: {exc}"
+
+                        if active_request_task is not None:
+                            normalized_output = output.strip().lower()
+                            # Primary cancel path is routed through orchestrator.
+                            # Fallback to direct task cancel only when orchestrator
+                            # reports no running task but one is still active here.
+                            if normalized_output == "no running task to cancel.":
+                                await _cancel_inflight_request(
+                                    orchestrator=orchestrator,
+                                    request_task=active_request_task,
+                                )
+                            else:
+                                completed = await _wait_for_request_completion(
+                                    request_task=active_request_task,
+                                    timeout_sec=cancel_wait_timeout_sec,
+                                )
+                                if not completed:
+                                    print(
+                                        "[warn] cancel acknowledged but request is still shutting down"
+                                    )
+                            if active_request_task.done():
+                                active_request_task = None
+
+                        await _run_blocking(_safe_send, api, inbound.chat_id, output)
+                        continue
+
+                    if active_request_task is not None and not active_request_task.done():
+                        await _run_blocking(
+                            _safe_send,
+                            api,
+                            inbound.chat_id,
+                            "A task is already running for this session. Please try again shortly.",
+                        )
+                        continue
+
+                    active_request_task = asyncio.create_task(
+                        _process_inbound_request(
                             orchestrator=orchestrator,
                             api=api,
                             chat_id=inbound.chat_id,
                             user_id=inbound.user_id,
                             text=inbound.text,
-                            enabled=progress_notify,
-                            initial_delay_sec=progress_initial_delay_sec,
-                            interval_sec=progress_interval_sec,
-                            message_template=progress_message_template,
+                            progress_notify=progress_notify,
+                            progress_initial_delay_sec=progress_initial_delay_sec,
+                            progress_interval_sec=progress_interval_sec,
+                            progress_message_template=progress_message_template,
                         )
-                    except Exception as exc:
-                        output = f"internal error: {exc}"
-
-                    await _run_blocking(_safe_send, api, inbound.chat_id, output)
+                    )
             except Exception as exc:
                 print(f"[warn] polling loop error: {exc}")
 
             if loop_sleep_sec > 0:
                 await asyncio.sleep(loop_sleep_sec)
     finally:
+        if active_request_task is not None and not active_request_task.done():
+            active_request_task.cancel()
+            try:
+                await active_request_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
         await _close_codex_mcp(orchestrator)
 
 

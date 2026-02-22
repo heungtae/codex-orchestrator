@@ -43,6 +43,21 @@ class FailingWorkflow:
         raise CodexExecutionError("executor returned prompt-like output")
 
 
+class CancellableWorkflow:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def run(self, input_text, session):
+        self.started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        return {"output_text": "unexpected", "next_history": session.history}
+
+
 class OrchestratorTests(unittest.TestCase):
     @staticmethod
     def _build(tmp_path: Path) -> BotOrchestrator:
@@ -85,6 +100,7 @@ class OrchestratorTests(unittest.TestCase):
 
             output = asyncio.run(orchestrator.handle_message("1", "2", "/start"))
             self.assertIn("/profile list|<name>", output)
+            self.assertIn("/cancel", output)
             self.assertIn(f"session_working_directory: {Path(tmp).resolve()}", output)
 
     def test_new_command_resets_session(self) -> None:
@@ -151,6 +167,42 @@ class OrchestratorTests(unittest.TestCase):
 
             not_found = asyncio.run(orchestrator.handle_message("1", "2", "/profile unknown"))
             self.assertIn("profile not found: unknown", not_found)
+
+    def test_cancel_command_returns_no_running_task_when_idle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            orchestrator = self._build(Path(tmp))
+            response = asyncio.run(orchestrator.handle_message("1", "2", "/cancel"))
+            self.assertEqual(response, "no running task to cancel.")
+
+    def test_cancel_command_cancels_running_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mcp = CodexMcpServer()
+            workflow = CancellableWorkflow()
+            orchestrator = BotOrchestrator(
+                router=CommandRouter(),
+                session_manager=SessionManager(base_dir=Path(tmp) / "sessions"),
+                trace_logger=TraceLogger(base_dir=Path(tmp) / "traces"),
+                single_workflow=workflow,
+                multi_workflow=FakeMultiWorkflow(),
+                codex_mcp=mcp,
+            )
+
+            async def _scenario() -> tuple[str, str]:
+                running = asyncio.create_task(orchestrator.handle_message("1", "2", "long work"))
+                await asyncio.wait_for(workflow.started.wait(), timeout=1)
+                cancel_message = await orchestrator.handle_message("1", "2", "/cancel")
+                result_message = await asyncio.wait_for(running, timeout=1)
+                return cancel_message, result_message
+
+            cancel_message, result_message = asyncio.run(_scenario())
+
+            self.assertEqual(cancel_message, "cancel requested.")
+            self.assertEqual(result_message, "request canceled.")
+            self.assertTrue(workflow.cancelled.is_set())
+
+            status = asyncio.run(orchestrator.handle_message("1", "2", "/status"))
+            self.assertIn("last_run: error", status)
+            self.assertIn("last_error: cancelled", status)
 
 
 if __name__ == "__main__":

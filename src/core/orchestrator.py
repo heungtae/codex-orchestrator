@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -26,6 +27,8 @@ class BotOrchestrator:
     codex_mcp: CodexMcpServer
     working_directory: str | None = None
     profile_registry: ProfileRegistry = field(default_factory=ProfileRegistry.build_default)
+    _running_tasks: dict[str, asyncio.Task[Any]] = field(default_factory=dict, init=False, repr=False)
+    _running_tasks_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
     async def handle_message(self, chat_id: str | int, user_id: str | int, text: str | None) -> str:
         run_id = str(uuid.uuid4())
@@ -172,6 +175,29 @@ class BotOrchestrator:
                     session.mode,
                 )
 
+        if route.command == "cancel":
+            async with self.session_manager.lock(chat_id=chat_id, user_id=user_id):
+                session = await self.session_manager.load(chat_id=chat_id, user_id=user_id)
+                session_id = session.session_id
+                if self._ensure_session_profile(session):
+                    await self.session_manager.save(session)
+                mode = session.mode
+                run_lock = session.run_lock
+
+            running_task = await self._get_running_task(session_id)
+            if running_task is None or running_task.done():
+                if run_lock:
+                    async with self.session_manager.lock(chat_id=chat_id, user_id=user_id):
+                        stale_session = await self.session_manager.load(chat_id=chat_id, user_id=user_id)
+                        if stale_session.run_lock:
+                            stale_session.run_lock = False
+                            await self.session_manager.save(stale_session)
+                            mode = stale_session.mode
+                return "no running task to cancel.", mode
+
+            running_task.cancel()
+            return "cancel requested.", mode
+
         return "unsupported command", "single"
 
     async def _handle_workflow_message(
@@ -198,34 +224,53 @@ class BotOrchestrator:
 
             session.run_lock = True
             await self.session_manager.save(session)
+            workflow = self.single_workflow if session.mode == "single" else self.multi_workflow
+            mode = session.mode
+            session_id = session.session_id
 
-            try:
-                workflow = (
-                    self.single_workflow if session.mode == "single" else self.multi_workflow
-                )
-                result = await workflow.run(input_text=route.text, session=session)
-                session.history = result.get("next_history", session.history)
-                session.last_run_status = "ok"
-                session.last_run_latency_ms = int((time.monotonic() - started) * 1000)
-                session.last_error = None
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            await self._set_running_task(session_id=session_id, task=current_task)
+
+        try:
+            result = await workflow.run(input_text=route.text, session=session)
+            async with self.session_manager.lock(chat_id=chat_id, user_id=user_id):
+                latest = await self.session_manager.load(chat_id=chat_id, user_id=user_id)
+                latest.history = result.get("next_history", latest.history)
+                latest.last_run_status = "ok"
+                latest.last_run_latency_ms = int((time.monotonic() - started) * 1000)
+                latest.last_error = None
                 if "review_round" in result:
-                    session.last_review_round = int(result["review_round"])
+                    latest.last_review_round = int(result["review_round"])
                 if "review_result" in result:
-                    session.last_review_result = result["review_result"]
-
-                return (
-                    result.get("output_text", ""),
-                    session.mode,
-                    session.last_review_round,
-                    session.last_review_result,
-                )
-            except Exception as exc:
-                session.last_run_status = "error"
-                session.last_error = str(exc)
-                raise
-            finally:
-                session.run_lock = False
-                await self.session_manager.save(session)
+                    latest.last_review_result = result["review_result"]
+                latest.run_lock = False
+                await self.session_manager.save(latest)
+            return (
+                result.get("output_text", ""),
+                mode,
+                latest.last_review_round,
+                latest.last_review_result,
+            )
+        except asyncio.CancelledError:
+            async with self.session_manager.lock(chat_id=chat_id, user_id=user_id):
+                latest = await self.session_manager.load(chat_id=chat_id, user_id=user_id)
+                latest.last_run_status = "error"
+                latest.last_error = "cancelled"
+                latest.run_lock = False
+                await self.session_manager.save(latest)
+            return ("request canceled.", mode, latest.last_review_round, latest.last_review_result)
+        except Exception as exc:
+            async with self.session_manager.lock(chat_id=chat_id, user_id=user_id):
+                latest = await self.session_manager.load(chat_id=chat_id, user_id=user_id)
+                latest.last_run_status = "error"
+                latest.last_error = str(exc)
+                latest.run_lock = False
+                await self.session_manager.save(latest)
+            raise
+        finally:
+            if current_task is not None:
+                await self._clear_running_task(session_id=session_id, task=current_task)
 
     async def _mark_error(
         self,
@@ -247,6 +292,24 @@ class BotOrchestrator:
         except Exception:
             pass
 
+    async def _set_running_task(self, *, session_id: str, task: asyncio.Task[Any]) -> None:
+        async with self._running_tasks_lock:
+            self._running_tasks[session_id] = task
+
+    async def _clear_running_task(self, *, session_id: str, task: asyncio.Task[Any]) -> None:
+        async with self._running_tasks_lock:
+            current = self._running_tasks.get(session_id)
+            if current is task:
+                self._running_tasks.pop(session_id, None)
+
+    async def _get_running_task(self, session_id: str) -> asyncio.Task[Any] | None:
+        async with self._running_tasks_lock:
+            task = self._running_tasks.get(session_id)
+            if task is not None and task.done():
+                self._running_tasks.pop(session_id, None)
+                return None
+            return task
+
     def _safe_mcp_status(self) -> dict[str, Any] | None:
         try:
             return self.codex_mcp.get_status()
@@ -264,6 +327,7 @@ class BotOrchestrator:
                 "/new",
                 "/status",
                 "/profile list|<name>",
+                "/cancel",
                 "non-reserved /... and plain text are forwarded to Codex workflow",
                 f"session_working_directory: {working_directory}",
             ]
@@ -330,10 +394,22 @@ class BotOrchestrator:
         normalized_name = selected.name
         normalized_model = selected.model
         normalized_working_directory = selected.working_directory
+        normalized_agent_models: dict[str, str] = {}
+        normalized_agent_prompts: dict[str, str] = {}
+        for agent_name, agent_profile in selected.agent_overrides.items():
+            normalized_agent = str(agent_name).strip().lower()
+            if not normalized_agent:
+                continue
+            if agent_profile.model:
+                normalized_agent_models[normalized_agent] = agent_profile.model
+            if agent_profile.system_prompt:
+                normalized_agent_prompts[normalized_agent] = agent_profile.system_prompt
         if (
             session.profile_name != normalized_name
             or session.profile_model != normalized_model
             or session.profile_working_directory != normalized_working_directory
+            or session.profile_agent_models != normalized_agent_models
+            or session.profile_agent_system_prompts != normalized_agent_prompts
         ):
             self._apply_profile_to_session(session, selected)
             return True
@@ -344,6 +420,18 @@ class BotOrchestrator:
         session.profile_name = profile.name
         session.profile_model = profile.model
         session.profile_working_directory = profile.working_directory
+        agent_models: dict[str, str] = {}
+        agent_prompts: dict[str, str] = {}
+        for agent_name, agent_profile in profile.agent_overrides.items():
+            normalized_agent = str(agent_name).strip().lower()
+            if not normalized_agent:
+                continue
+            if agent_profile.model:
+                agent_models[normalized_agent] = agent_profile.model
+            if agent_profile.system_prompt:
+                agent_prompts[normalized_agent] = agent_profile.system_prompt
+        session.profile_agent_models = agent_models
+        session.profile_agent_system_prompts = agent_prompts
 
     def _format_profile_list(self, session: BotSession) -> str:
         default_profile = self.profile_registry.default_profile()

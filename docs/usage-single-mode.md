@@ -5,7 +5,7 @@ Telegram 연동부터 실제 채팅 운영 절차까지는 `docs/telegram-integr
 ## 1. 현재 구현 범위
 - Python 기반 오케스트레이터 핵심 로직 구현 완료
 - `single` 모드 기본값 적용
-- 명령 라우팅: `/start`, `/mode`, `/new`, `/status`, 그 외 `/...`, 일반 텍스트
+- 명령 라우팅: `/start`, `/mode`, `/new`, `/status`, `/cancel`, 그 외 `/...`, 일반 텍스트
 - 세션 파일 저장, trace 로그 저장, Codex MCP 상태 조회 포함
 - 참고: Telegram long polling 실행 스크립트(`scripts/telegram_polling_runner.py`)가 포함되어 있으며, `BotOrchestrator.handle_message()`로도 동일 로직을 직접 호출할 수 있습니다.
 
@@ -54,13 +54,54 @@ default = "bridge"
 model = "gpt-5"
 working_directory = "~/develop/ai-agent/codex-orchestrator"
 
+[agents.single.developer]
+model = "gpt-5-codex"
+system_prompt_file = "./prompts/developer.txt"
+
+[agents.single.reviewer]
+system_prompt = "You are Reviewer Agent. Focus on concrete diffs and risks."
+
+[agents.multi.designer]
+model = "gpt-5"
+system_prompt = "You are Multi Designer Agent."
+
+[agents.multi.frontend.developer]
+model = "gpt-5"
+system_prompt = "You are Multi Frontend Developer Agent."
+
+[agents.multi.backend.developer]
+model = "gpt-5"
+system_prompt = "You are Multi Backend Developer Agent."
+
+[agents.multi.tester]
+model = "gpt-5"
+system_prompt = "You are Multi Tester Agent."
+
+[agents.multi.manager]
+model = "gpt-5"
+system_prompt = "You are Multi Manager Agent."
+
 [profiles.bridge]
 model = "gpt-5"
 working_directory = "~/develop/bridge-project"
 ```
 - 기본 경로(`~/.codex-orchestrator/conf.toml`) 파일이 없으면 runner 최초 실행 시 자동 생성됩니다.
 - `allowed_users` 설정 시 목록에 없는 Telegram 사용자는 `Unauthorized` 응답 후 차단됩니다.
-- `/profile <name>`으로 프로파일을 전환하면 `model`/`working_directory`가 해당 프로파일로 적용됩니다.
+- `/profile <name>`으로 프로파일을 전환하면 `model`/`working_directory`와 agent별 override가 함께 적용됩니다.
+- agent별 설정 키:
+  - `agents.single.developer`
+  - `agents.single.reviewer`
+  - `agents.multi.designer`
+  - `agents.multi.frontend.developer`
+  - `agents.multi.backend.developer`
+  - `agents.multi.tester`
+  - `agents.multi.manager`
+- 현재 agent 이름:
+  - single 모드: `single.developer`, `single.reviewer`
+  - multi 모드(현재 placeholder 실행 우선순위): `multi.manager` -> `multi.designer` -> `multi.frontend.developer` -> `multi.backend.developer` -> `multi.tester`
+- agent별 값이 없으면 기본값을 사용합니다.
+  - model 기본값: `profiles.<name>.model`
+  - system prompt 기본값: single은 내장 기본 프롬프트, multi는 미지정
 
 예시:
 ```bash
@@ -94,11 +135,12 @@ PY
 - `/mode single|multi`: 모드 전환
 - `/new`: 현재 `chat_id:user_id` 세션 초기화 (모드도 `single`로 리셋)
 - `/status`: 현재 모드, 최근 실행 결과, single 리뷰 상태, codex_mcp 상태 출력
+- `/cancel`: 현재 세션에서 실행 중인 요청 취소
 - `/profile list|<name>`: 프로파일 목록 조회/전환
 - 일반 텍스트: 현재 모드 워크플로우로 즉시 전달
 
 라우팅 규칙:
-- 예약 명령(`/start`, `/mode`, `/new`, `/status`, `/profile`)만 내부 처리
+- 예약 명령(`/start`, `/mode`, `/new`, `/status`, `/cancel`, `/profile`)만 내부 처리
 - 그 외 `/...`는 Codex 슬래시 명령으로 전달
 
 ## 5. Single 모드 동작
