@@ -1,0 +1,2 @@
+[console_scripts]
+codex-orchestrator = scripts.telegram_polling_runner:main

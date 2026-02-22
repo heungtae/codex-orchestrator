@@ -81,12 +81,12 @@ cp conf.toml.example ~/.codex-orchestrator/conf.toml
 ## 실행
 PyPI 설치 기준:
 ```bash
-codex-orchestrator-polling
+codex-orchestrator
 ```
 
 `command not found`가 나오면:
 ```bash
-~/.local/bin/codex-orchestrator-polling
+~/.local/bin/codex-orchestrator
 ```
 
 로컬 소스 실행 기준:
