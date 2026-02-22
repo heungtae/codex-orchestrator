@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import builtins
 import contextvars
 import functools
 import json
 import logging
 import os
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -56,6 +58,23 @@ _ACTIVE_NOTIFICATION_HANDLER: contextvars.ContextVar[
     Any | None
 ] = contextvars.ContextVar("codex_notification_handler", default=None)
 _ACTIVE_NOTIFICATION_HANDLER_FALLBACK: Any | None = None
+
+
+def _stdout_print(
+    *values: object,
+    **kwargs: Any,
+) -> None:
+    file = kwargs.get("file")
+    target = sys.stdout if file is None else file
+    if target is sys.stdout:
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        if values:
+            first, *rest = values
+            values = (f"[{timestamp}] {first}", *rest)
+        else:
+            values = (f"[{timestamp}]",)
+
+    builtins.print(*values, **kwargs)
 
 
 @dataclass
@@ -259,14 +278,14 @@ class _CodexEventValidationFilter(logging.Filter):
         try:
             callback(notification)
         except Exception as exc:
-            print(f"[warn] failed to dispatch codex notification: {exc}")
+            _stdout_print(f"[warn] failed to dispatch codex notification: {exc}")
 
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
         if "Failed to validate notification" in message and "codex/event" in message:
             notification = self._extract_agent_text_notification(message)
             if notification is not None:
-                print(self._format_agent_text_notification(notification), flush=True)
+                _stdout_print(self._format_agent_text_notification(notification), flush=True)
                 self._dispatch_intermediate_notification(notification)
             return False
         return True
@@ -370,7 +389,7 @@ def _safe_send(api: TelegramBotApi, chat_id: str, text: str) -> None:
         try:
             api.send_message(chat_id=chat_id, text=chunk)
         except Exception as exc:
-            print(f"[warn] failed to send telegram message: {exc}")
+            _stdout_print(f"[warn] failed to send telegram message: {exc}")
 
 
 async def _run_blocking(func: Any, /, *args: Any, **kwargs: Any) -> Any:
@@ -442,7 +461,7 @@ async def _run_with_progress_notifications(
             try:
                 await _run_blocking(_safe_send, api, chat_id, notification.text)
             except Exception as exc:
-                print(f"[warn] failed to forward intermediate codex notification: {exc}")
+                _stdout_print(f"[warn] failed to forward intermediate codex notification: {exc}")
 
         try:
             running_loop = asyncio.get_running_loop()
@@ -498,7 +517,7 @@ async def _process_inbound_request(
         try:
             await _close_codex_mcp(orchestrator)
         except Exception as exc:
-            print(f"[warn] failed to close codex mcp session after request: {exc}")
+            _stdout_print(f"[warn] failed to close codex mcp session after request: {exc}")
 
     await _run_blocking(_safe_send, api, chat_id, output)
 
@@ -517,7 +536,7 @@ async def _cancel_inflight_request(
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            print(f"[warn] request task finished with error before cancel: {exc}")
+            _stdout_print(f"[warn] request task finished with error before cancel: {exc}")
         return False
 
     request_task.cancel()
@@ -526,7 +545,7 @@ async def _cancel_inflight_request(
     except asyncio.CancelledError:
         pass
     except Exception as exc:
-        print(f"[warn] request task failed while cancelling: {exc}")
+        _stdout_print(f"[warn] request task failed while cancelling: {exc}")
     return True
 
 
@@ -544,7 +563,7 @@ async def _wait_for_request_completion(
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            print(f"[warn] request task failed after cancel: {exc}")
+            _stdout_print(f"[warn] request task failed after cancel: {exc}")
         return True
 
     try:
@@ -555,7 +574,7 @@ async def _wait_for_request_completion(
     except asyncio.CancelledError:
         return True
     except Exception as exc:
-        print(f"[warn] request task failed after cancel: {exc}")
+        _stdout_print(f"[warn] request task failed after cancel: {exc}")
         return True
 
 
@@ -582,23 +601,23 @@ def _format_mcp_status(status: dict[str, Any]) -> str:
 async def _warmup_codex_mcp(orchestrator: Any) -> bool:
     executor = _extract_executor(orchestrator)
     if isinstance(executor, EchoCodexExecutor):
-        print("[warn] CODEX_ALLOW_ECHO_EXECUTOR=true (debug mode). mcp warmup is skipped.")
+        _stdout_print("[warn] CODEX_ALLOW_ECHO_EXECUTOR=true (debug mode). mcp warmup is skipped.")
         return False
 
     if not isinstance(executor, CodexMcpExecutor):
-        print(f"[warn] unknown executor type: {type(executor).__name__}; skip mcp warmup")
+        _stdout_print(f"[warn] unknown executor type: {type(executor).__name__}; skip mcp warmup")
         return False
 
     try:
         await executor.warmup()
         status = orchestrator.codex_mcp.get_status()
-        print(f"[info] codex mcp-server connected: {_format_mcp_status(status)}")
+        _stdout_print(f"[info] codex mcp-server connected: {_format_mcp_status(status)}")
         # Keep request task affinity stable by not retaining an opened MCP session
         # from startup task. Each inbound request opens/closes its own session.
         await executor.close()
         return True
     except Exception as exc:
-        print(f"[error] codex mcp-server connection failed: {exc}")
+        _stdout_print(f"[error] codex mcp-server connection failed: {exc}")
         return False
 
 
@@ -610,7 +629,7 @@ async def _close_codex_mcp(orchestrator: Any) -> None:
     try:
         await executor.close()
     except Exception as exc:
-        print(f"[warn] failed to close codex mcp session: {exc}")
+        _stdout_print(f"[warn] failed to close codex mcp session: {exc}")
 
 
 async def _run_polling() -> None:
@@ -642,17 +661,17 @@ async def _run_polling() -> None:
     )
 
     api = TelegramBotApi(token=token)
-    print(f"[info] conf file: {conf_file}")
+    _stdout_print(f"[info] conf file: {conf_file}")
     if allowed_users is not None:
-        print(f"[info] telegram user allowlist enabled: count={len(allowed_users)}")
+        _stdout_print(f"[info] telegram user allowlist enabled: count={len(allowed_users)}")
     else:
-        print("[info] telegram user allowlist disabled (telegram.allowed_users not set)")
+        _stdout_print("[info] telegram user allowlist disabled (telegram.allowed_users not set)")
 
     if clear_webhook:
         try:
             await _run_blocking(api.delete_webhook, drop_pending_updates=drop_pending)
         except Exception as exc:
-            print(f"[warn] failed to delete webhook on startup: {exc}")
+            _stdout_print(f"[warn] failed to delete webhook on startup: {exc}")
 
     orchestrator = build_orchestrator()
     active_request_task: asyncio.Task[None] | None = None
@@ -663,12 +682,12 @@ async def _run_polling() -> None:
                 pending_updates = await _run_blocking(api.get_updates, offset=None, timeout=0)
                 next_offset = _next_offset_from_updates(pending_updates)
                 if next_offset is not None:
-                    print(
+                    _stdout_print(
                         "[info] skipped pending telegram updates on startup: "
                         f"count={len(pending_updates)}, next_offset={next_offset}"
                     )
             except Exception as exc:
-                print(f"[warn] failed to skip pending telegram updates on startup: {exc}")
+                _stdout_print(f"[warn] failed to skip pending telegram updates on startup: {exc}")
 
         require_mcp_warmup = _env_bool("TELEGRAM_REQUIRE_MCP_WARMUP", True)
         warmup_ok = await _warmup_codex_mcp(orchestrator)
@@ -679,7 +698,7 @@ async def _run_polling() -> None:
                 "or disable strict check with TELEGRAM_REQUIRE_MCP_WARMUP=false"
             )
 
-        print("[info] telegram polling runner started")
+        _stdout_print("[info] telegram polling runner started")
         while True:
             if active_request_task is not None and active_request_task.done():
                 try:
@@ -687,7 +706,7 @@ async def _run_polling() -> None:
                 except asyncio.CancelledError:
                     pass
                 except Exception as exc:
-                    print(f"[warn] request task failed: {exc}")
+                    _stdout_print(f"[warn] request task failed: {exc}")
                 active_request_task = None
 
             try:
@@ -705,7 +724,7 @@ async def _run_polling() -> None:
                     if not inbound:
                         continue
 
-                    print(
+                    _stdout_print(
                         _format_inbound_stdout(
                             chat_id=inbound.chat_id,
                             user_id=inbound.user_id,
@@ -753,7 +772,7 @@ async def _run_polling() -> None:
                                     timeout_sec=cancel_wait_timeout_sec,
                                 )
                                 if not completed:
-                                    print(
+                                    _stdout_print(
                                         "[warn] cancel acknowledged but request is still shutting down"
                                     )
                             if active_request_task.done():
@@ -785,7 +804,7 @@ async def _run_polling() -> None:
                         )
                     )
             except Exception as exc:
-                print(f"[warn] polling loop error: {exc}")
+                _stdout_print(f"[warn] polling loop error: {exc}")
 
             if loop_sleep_sec > 0:
                 await asyncio.sleep(loop_sleep_sec)
@@ -806,7 +825,7 @@ def main() -> None:
     try:
         asyncio.run(_run_polling())
     except KeyboardInterrupt:
-        print("\n[info] stopped by user")
+        _stdout_print("\n[info] stopped by user")
 
 
 if __name__ == "__main__":

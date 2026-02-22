@@ -17,6 +17,7 @@ from scripts.telegram_polling_runner import (
     _resolve_conf_path,
     _render_progress_message,
     _run_with_progress_notifications,
+    _stdout_print,
     _wait_for_request_completion,
 )
 
@@ -112,6 +113,18 @@ class TelegramPollingRunnerProgressTests(unittest.TestCase):
         self.assertEqual(
             rendered,
             "[telegram-inbound] chat_id=100 user_id=200 text=line1\\nline2\\rline3",
+        )
+
+    def test_stdout_print_prefixes_timestamp(self) -> None:
+        with (
+            patch("scripts.telegram_polling_runner.time.strftime", return_value="2026-02-22 09:10:11"),
+            patch("builtins.print") as mocked_print,
+        ):
+            _stdout_print("[info] hello", flush=True)
+
+        mocked_print.assert_called_once_with(
+            "[2026-02-22 09:10:11] [info] hello",
+            flush=True,
         )
 
     def test_process_inbound_request_closes_mcp_session(self) -> None:
