@@ -87,6 +87,7 @@ class MultiAgentWorkflowTests(unittest.TestCase):
 
         self.assertIn("final-summary", result["output_text"])
         self.assertIn("[multi-workflow]", result["output_text"])
+        self.assertIn("time=", result["output_text"])
         self.assertEqual(len(executor.calls), 2)
         self.assertEqual(executor.calls[0]["model"], "gpt-5")
         self.assertEqual(executor.calls[1]["model"], "gpt-5")

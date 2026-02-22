@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from core.models import BotSession, WorkflowResult
+from core.models import BotSession, WorkflowResult, utc_now_iso
 from integrations.codex_executor import CodexExecutor
 
 _MAX_HISTORY_ITEMS = 20
@@ -441,7 +441,7 @@ class MultiAgentWorkflow:
         missing = [result.role for result in stage_results if result.enabled and result.missing_outputs]
         executed_text = ",".join(executed) if executed else "-"
         return (
-            f"[multi-workflow] roles={executed_text}, "
+            f"[multi-workflow] time={utc_now_iso()} roles={executed_text}, "
             f"missing_output_roles={len(missing)}"
         )
 
