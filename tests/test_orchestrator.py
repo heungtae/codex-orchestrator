@@ -38,6 +38,20 @@ class FakeMultiWorkflow:
         }
 
 
+class FakePlanWorkflow:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run(self, input_text, session):
+        self.calls += 1
+        return {
+            "output_text": f"plan:{input_text}",
+            "next_history": [*session.history, {"role": "assistant", "content": input_text}],
+            "review_round": 1,
+            "review_result": "approved",
+        }
+
+
 class FailingWorkflow:
     async def run(self, input_text, session):
         raise CodexExecutionError("executor returned prompt-like output")
@@ -75,6 +89,7 @@ class OrchestratorTests(unittest.TestCase):
             session_manager=SessionManager(base_dir=tmp_path / "sessions"),
             trace_logger=TraceLogger(base_dir=tmp_path / "traces"),
             single_workflow=FakeSingleWorkflow(),
+            plan_workflow=FakePlanWorkflow(),
             multi_workflow=FakeMultiWorkflow(),
             codex_mcp=mcp,
             profile_registry=profiles,
@@ -90,8 +105,20 @@ class OrchestratorTests(unittest.TestCase):
             status = asyncio.run(orchestrator.handle_message("1", "2", "/status"))
             self.assertIn("mode: single", status)
             self.assertIn("profile: default, model=gpt-5, working_directory=/tmp/default", status)
-            self.assertIn("single_review: rounds=2/3, result=approved", status)
+            self.assertIn("single_run: direct", status)
             self.assertIn("codex_mcp: running=true, ready=true, pid=12345", status)
+
+    def test_plan_mode_runs_plan_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            orchestrator = self._build(Path(tmp))
+
+            switch = asyncio.run(orchestrator.handle_message("1", "2", "/mode plan"))
+            self.assertEqual(switch, "mode set to plan")
+            output = asyncio.run(orchestrator.handle_message("1", "2", "plan this"))
+            self.assertTrue(output.startswith("plan:"))
+            status = asyncio.run(orchestrator.handle_message("1", "2", "/status"))
+            self.assertIn("mode: plan", status)
+            self.assertIn("plan_review: rounds=1/3, result=approved", status)
 
     def test_start_command_includes_session_working_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -134,6 +161,7 @@ class OrchestratorTests(unittest.TestCase):
                 session_manager=SessionManager(base_dir=Path(tmp) / "sessions"),
                 trace_logger=TraceLogger(base_dir=Path(tmp) / "traces"),
                 single_workflow=FailingWorkflow(),
+                plan_workflow=FakePlanWorkflow(),
                 multi_workflow=FakeMultiWorkflow(),
                 codex_mcp=mcp,
             )
@@ -194,6 +222,7 @@ class OrchestratorTests(unittest.TestCase):
                 session_manager=SessionManager(base_dir=Path(tmp) / "sessions"),
                 trace_logger=TraceLogger(base_dir=Path(tmp) / "traces"),
                 single_workflow=workflow,
+                plan_workflow=FakePlanWorkflow(),
                 multi_workflow=FakeMultiWorkflow(),
                 codex_mcp=mcp,
             )

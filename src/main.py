@@ -269,11 +269,14 @@ def build_orchestrator() -> BotOrchestrator:
         )
 
     agent_factory = AgentFactory(executor=executor, max_review_rounds=3)
+    single_workflow = agent_factory.create_single_workflow()
+    plan_workflow = agent_factory.create_plan_workflow(single_fallback_workflow=single_workflow)
     return BotOrchestrator(
         router=CommandRouter(),
         session_manager=SessionManager(),
         trace_logger=TraceLogger(),
-        single_workflow=agent_factory.create_single_workflow(),
+        single_workflow=single_workflow,
+        plan_workflow=plan_workflow,
         multi_workflow=agent_factory.create_multi_workflow(),
         codex_mcp=codex_mcp,
         working_directory=getattr(executor, "cwd", None) or default_profile.working_directory,

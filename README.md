@@ -1,11 +1,12 @@
 # codex-orchestrator
 
-Telegram Bot에서 Codex 워크플로우(single/multi)를 실행하기 위한 Python 오케스트레이터입니다.
+Telegram Bot에서 Codex 워크플로우(single/plan/multi)를 실행하기 위한 Python 오케스트레이터입니다.
 
 ## 주요 기능
 - Telegram long polling 기반 요청 처리
 - `/mode`, `/profile`, `/cancel` 등 운영 명령 라우팅
-- single 모드 `planner -> developer -> reviewer` 단계 실행(리뷰 최대 3회 반복)
+- single 모드 단일 developer agent 즉시 실행
+- plan 모드 `planner -> developer -> reviewer` 조합 실행(요청별 단계 선검토, 단순 요청은 mode 전환 없이 single agent 경로로 위임, 리뷰 최대 3회)
 - 사용자 허용 목록(`telegram.allowed_users`) 기반 접근 제어
 - Codex MCP warmup 및 상태 확인
 - 세션/트레이스 파일 저장
@@ -13,7 +14,7 @@ Telegram Bot에서 Codex 워크플로우(single/multi)를 실행하기 위한 Py
 
 ## 프로젝트 구조
 - `src/core`: 라우팅, 오케스트레이션, 세션, 프로파일, 트레이스
-- `src/workflows`: single/multi 워크플로우
+- `src/workflows`: single/plan/multi 워크플로우
 - `src/integrations`: Codex executor, MCP 상태 연동
 - `src/bot`: Telegram update 파싱, 메시지 분할
 - `scripts/telegram_polling_runner.py`: 운영 진입점
@@ -28,6 +29,17 @@ Telegram Bot에서 Codex 워크플로우(single/multi)를 실행하기 위한 Py
 기본 설치:
 ```bash
 python3 -m pip install codex_orchestrator
+```
+
+특정 버전 설치:
+```bash
+python3 -m pip install "codex_orchestrator==<원하는_버전>"
+# 예: python3 -m pip install "codex_orchestrator==0.1.4"
+```
+
+버전 변경(업그레이드/다운그레이드):
+```bash
+python3 -m pip install --upgrade "codex_orchestrator==<원하는_버전>"
 ```
 
 Ubuntu/Debian 계열에서 아래 오류가 발생할 수 있습니다.
@@ -108,7 +120,7 @@ PYTHONPATH=src python3 -m unittest -q tests.test_telegram_polling_runner
 
 ## Telegram 명령
 - `/start`: 명령 안내
-- `/mode single|multi`: 모드 전환
+- `/mode single|plan|multi`: 모드 전환
 - `/new`: 현재 세션 초기화
 - `/status`: 실행 상태 확인
 - `/cancel`: 실행 중 요청 취소
@@ -121,4 +133,3 @@ PYTHONPATH=src python3 -m unittest -q tests.test_telegram_polling_runner
 ## 추가 문서
 - `docs/telegram-integration-runbook.md`: Telegram 연동/운영 절차
 - `docs/usage-single-mode.md`: single 모드 중심 사용 가이드
-

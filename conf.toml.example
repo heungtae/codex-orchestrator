@@ -38,20 +38,30 @@ working_directory = "~/develop/bridge-project"
 
 # Global agent overrides (applies to all profiles unless overridden).
 # If both system_prompt and system_prompt_file are set, system_prompt_file takes precedence.
-# [agents.single.planner]
-# model = "gpt-5"
-# system_prompt = "You are Planner Agent..."
-# system_prompt_file = "./prompts/planner.txt"
-#
+# single mode: direct developer execution (no planner/reviewer stage)
 # [agents.single.developer]
 # model = "gpt-5-codex"
-# system_prompt = "You are Developer Agent..."
+# system_prompt = "You are Single Developer Agent..."
 # system_prompt_file = "./prompts/developer.txt"
 #
-# [agents.single.reviewer]
+# plan mode: planner -> developer -> reviewer composition
+# [agents.plan.planner]
 # model = "gpt-5"
-# system_prompt = "You are Reviewer Agent..."
-# system_prompt_file = "./prompts/reviewer.txt"
+# system_prompt = "You are Plan Planner Agent..."
+# system_prompt_file = "./prompts/plan-planner.txt"
+#
+# [agents.plan.developer]
+# model = "gpt-5-codex"
+# system_prompt = "You are Plan Developer Agent..."
+# system_prompt_file = "./prompts/plan-developer.txt"
+#
+# [agents.plan.reviewer]
+# model = "gpt-5"
+# system_prompt = "You are Plan Reviewer Agent..."
+# system_prompt_file = "./prompts/plan-reviewer.txt"
+#
+# Compatibility:
+# plan mode falls back to agents.single.planner/developer/reviewer when agents.plan.* is missing.
 #
 # Multi role overrides.
 # If both system_prompt and system_prompt_file are set, system_prompt_file takes precedence.

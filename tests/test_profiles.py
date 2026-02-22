@@ -133,6 +133,37 @@ system_prompt_file = "./prompts/planner.txt"
             assert planner is not None
             self.assertEqual(planner.system_prompt, "Planner prompt from file")
 
+    def test_load_profiles_from_conf_parses_plan_agent_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = Path(tmp) / "conf.toml"
+            conf.write_text(
+                """
+[profiles.default]
+model = "gpt-5"
+
+[agents.plan.planner]
+model = "gpt-5-plan"
+
+[agents.plan.developer]
+model = "gpt-5-dev"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            registry = load_profiles_from_conf(conf)
+            profile = registry.default_profile()
+
+            planner = profile.agent_overrides.get("plan.planner")
+            developer = profile.agent_overrides.get("plan.developer")
+
+            self.assertIsNotNone(planner)
+            assert planner is not None
+            self.assertEqual(planner.model, "gpt-5-plan")
+
+            self.assertIsNotNone(developer)
+            assert developer is not None
+            self.assertEqual(developer.model, "gpt-5-dev")
+
     def test_load_profiles_from_conf_with_agents_only_uses_default_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             conf = Path(tmp) / "conf.toml"

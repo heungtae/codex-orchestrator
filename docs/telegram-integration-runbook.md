@@ -127,7 +127,7 @@ PYTHONPATH=src python3 scripts/telegram_polling_runner.py
 - `/start`: 명령 안내
 - `/status`: 모드/프로파일/최근 실행/codex_mcp 상태 확인
 - `/profile list|<name>`: 프로파일 조회/전환
-- `/mode single|multi`: 실행 모드 전환
+- `/mode single|plan|multi`: 실행 모드 전환
 - `/cancel`: 현재 세션 실행 취소 요청
 - `/new`: 현재 세션 초기화
 

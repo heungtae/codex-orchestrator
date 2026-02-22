@@ -13,6 +13,11 @@ class CommandRouterTests(unittest.TestCase):
         self.assertEqual(route.command, "mode")
         self.assertEqual(route.args, ("single",))
 
+        route = self.router.route("/mode plan")
+        self.assertEqual(route.kind, "bot_command")
+        self.assertEqual(route.command, "mode")
+        self.assertEqual(route.args, ("plan",))
+
         route = self.router.route("/new")
         self.assertEqual(route.kind, "bot_command")
         self.assertEqual(route.command, "new")

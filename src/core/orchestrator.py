@@ -23,6 +23,7 @@ class BotOrchestrator:
     session_manager: SessionManager
     trace_logger: TraceLogger
     single_workflow: Workflow
+    plan_workflow: Workflow
     multi_workflow: Workflow
     codex_mcp: CodexMcpServer
     working_directory: str | None = None
@@ -112,8 +113,8 @@ class BotOrchestrator:
 
         if route.command == "mode":
             mode = route.args[0] if route.args else ""
-            if mode not in ("single", "multi"):
-                return "usage: /mode single|multi", "single"
+            if mode not in ("single", "plan", "multi"):
+                return "usage: /mode single|plan|multi", "single"
 
             async with self.session_manager.lock(chat_id=chat_id, user_id=user_id):
                 session = await self.session_manager.load(chat_id=chat_id, user_id=user_id)
@@ -224,7 +225,12 @@ class BotOrchestrator:
 
             session.run_lock = True
             await self.session_manager.save(session)
-            workflow = self.single_workflow if session.mode == "single" else self.multi_workflow
+            if session.mode == "single":
+                workflow = self.single_workflow
+            elif session.mode == "plan":
+                workflow = self.plan_workflow
+            else:
+                workflow = self.multi_workflow
             mode = session.mode
             session_id = session.session_id
 
@@ -323,7 +329,7 @@ class BotOrchestrator:
             [
                 "available commands:",
                 "/start",
-                "/mode single|multi",
+                "/mode single|plan|multi",
                 "/new",
                 "/status",
                 "/profile list|<name>",
@@ -363,9 +369,11 @@ class BotOrchestrator:
             ),
         ]
 
-        if session.mode == "single":
+        if session.mode == "plan":
             result = session.last_review_result or "-"
-            lines.append(f"single_review: rounds={session.last_review_round}/3, result={result}")
+            lines.append(f"plan_review: rounds={session.last_review_round}/3, result={result}")
+        elif session.mode == "single":
+            lines.append("single_run: direct")
 
         if not mcp_status:
             lines.append("codex_mcp: unknown")
