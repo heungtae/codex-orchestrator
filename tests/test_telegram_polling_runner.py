@@ -5,10 +5,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from integrations.codex_executor import codex_agent_name_scope
 from scripts.telegram_polling_runner import (
     _ACTIVE_NOTIFICATION_HANDLER,
+    _AgentTextNotification,
     _CodexEventValidationFilter,
     _cancel_inflight_request,
+    _format_intermediate_notification_text,
     _format_inbound_stdout,
     _is_cancel_command,
     _load_allowed_users_from_conf,
@@ -320,7 +323,49 @@ poll_timeout = "30"
         ]
         self.assertIsNone(_next_offset_from_updates(updates))
 
+    def test_format_intermediate_notification_text_adds_agent_prefix(self) -> None:
+        text = _format_intermediate_notification_text(
+            _AgentTextNotification(
+                message_id="msg_mid",
+                phase="commentary",
+                text="progress",
+                agent_name="single.developer",
+            )
+        )
+        self.assertEqual(text, "[single.developer] progress")
+
     def test_codex_event_validation_filter_prints_agent_text_notification(self) -> None:
+        filter_ = _CodexEventValidationFilter()
+        record = logging.LogRecord(
+            name="root",
+            level=logging.WARNING,
+            pathname=__file__,
+            lineno=1,
+            msg=(
+                "Failed to validate notification: validation error. "
+                "Message was: method='codex/event' "
+                "params={'msg': {'type': 'item_completed', 'item': {'type': 'AgentMessage', "
+                "'id': 'msg_1', 'content': [{'type': 'Text', 'text': 'hello world'}], "
+                "'phase': 'commentary', 'agent_name': 'single.planner'}}} jsonrpc='2.0'"
+            ),
+            args=(),
+            exc_info=None,
+        )
+
+        with patch("builtins.print") as mocked_print:
+            allowed = filter_.filter(record)
+
+        self.assertFalse(allowed)
+        self.assertEqual(mocked_print.call_count, 1)
+        printed = mocked_print.call_args.args[0]
+        self.assertIn("[codex-notification]", printed)
+        self.assertIn("id=msg_1", printed)
+        self.assertIn("phase=commentary", printed)
+        self.assertIn("agent=single.planner", printed)
+        self.assertIn("text=hello world", printed)
+        self.assertEqual(mocked_print.call_args.kwargs, {"flush": True})
+
+    def test_codex_event_validation_filter_uses_agent_context_fallback(self) -> None:
         filter_ = _CodexEventValidationFilter()
         record = logging.LogRecord(
             name="root",
@@ -338,17 +383,13 @@ poll_timeout = "30"
             exc_info=None,
         )
 
-        with patch("builtins.print") as mocked_print:
-            allowed = filter_.filter(record)
+        with codex_agent_name_scope("single.reviewer"):
+            with patch("builtins.print") as mocked_print:
+                allowed = filter_.filter(record)
 
         self.assertFalse(allowed)
-        self.assertEqual(mocked_print.call_count, 1)
         printed = mocked_print.call_args.args[0]
-        self.assertIn("[codex-notification]", printed)
-        self.assertIn("id=msg_1", printed)
-        self.assertIn("phase=commentary", printed)
-        self.assertIn("text=hello world", printed)
-        self.assertEqual(mocked_print.call_args.kwargs, {"flush": True})
+        self.assertIn("agent=single.reviewer", printed)
 
     def test_codex_event_validation_filter_prints_final_answer_to_stdout(self) -> None:
         filter_ = _CodexEventValidationFilter()

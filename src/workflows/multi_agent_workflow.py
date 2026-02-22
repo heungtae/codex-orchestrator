@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from core.models import BotSession, WorkflowResult, utc_now_iso
-from integrations.codex_executor import CodexExecutor
+from integrations.codex_executor import CodexExecutor, codex_agent_name_scope
 
 _MAX_HISTORY_ITEMS = 20
 _MAX_ROLE_OUTPUT_CHARS = 2500
@@ -247,13 +247,15 @@ class MultiAgentWorkflow:
         system_instructions = _select_agent_override(session.profile_agent_system_prompts, role_keys)
         if system_instructions is None:
             system_instructions = _DEFAULT_ROLE_SYSTEM_INSTRUCTIONS.get(role)
-        output = await self.executor.run(
-            prompt=prompt,
-            history=session.history,
-            system_instructions=system_instructions,
-            model=selected_model,
-            cwd=session.profile_working_directory,
-        )
+        agent_name = role_keys[0] if role_keys else role
+        with codex_agent_name_scope(agent_name):
+            output = await self.executor.run(
+                prompt=prompt,
+                history=session.history,
+                system_instructions=system_instructions,
+                model=selected_model,
+                cwd=session.profile_working_directory,
+            )
         return output.strip()
 
     def _build_plan_prompt(self, input_text: str) -> str:

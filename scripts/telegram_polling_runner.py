@@ -22,6 +22,7 @@ from bot.telegram_adapter import parse_update, split_telegram_text
 from integrations.codex_executor import (
     CodexMcpExecutor,
     EchoCodexExecutor,
+    get_active_codex_agent_name,
 )
 from main import build_orchestrator
 
@@ -84,6 +85,7 @@ class _AgentTextNotification:
     message_id: str
     phase: str
     text: str
+    agent_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -297,19 +299,46 @@ class _CodexEventValidationFilter(logging.Filter):
         if not text_parts:
             return None
 
+        agent_name = cls._extract_agent_name(params=params, msg=msg, item=item)
         message_id = item.get("id")
         return _AgentTextNotification(
             message_id=message_id if isinstance(message_id, str) else "",
             phase=phase,
             text="\n".join(text_parts),
+            agent_name=agent_name,
         )
 
     @staticmethod
+    def _extract_agent_name(
+        *,
+        params: dict[str, Any],
+        msg: dict[str, Any],
+        item: dict[str, Any],
+    ) -> str | None:
+        keys = ("agent_name", "agent", "agentName", "role_name", "role")
+        containers: list[dict[str, Any]] = [item, msg, params]
+        for node in (item.get("metadata"), msg.get("metadata"), params.get("metadata")):
+            if isinstance(node, dict):
+                containers.append(node)
+
+        for container in containers:
+            for key in keys:
+                value = container.get(key)
+                if isinstance(value, str):
+                    normalized = value.strip()
+                    if normalized:
+                        return normalized
+
+        return get_active_codex_agent_name()
+
+    @staticmethod
     def _format_agent_text_notification(notification: _AgentTextNotification) -> str:
+        agent_name = notification.agent_name or "-"
         return (
             "[codex-notification] "
             f"id={notification.message_id} "
             f"phase={notification.phase} "
+            f"agent={agent_name} "
             f"text={notification.text}"
         )
 
@@ -578,6 +607,12 @@ def _format_inbound_stdout(*, chat_id: str, user_id: str, text: str) -> str:
     return f"[telegram-inbound] chat_id={chat_id} user_id={user_id} text={escaped_text}"
 
 
+def _format_intermediate_notification_text(notification: _AgentTextNotification) -> str:
+    if notification.agent_name:
+        return f"[{notification.agent_name}] {notification.text}"
+    return notification.text
+
+
 async def _run_with_progress_notifications(
     *,
     orchestrator: Any,
@@ -592,11 +627,13 @@ async def _run_with_progress_notifications(
 ) -> str:
     del enabled, initial_delay_sec, interval_sec, message_template
     loop = asyncio.get_running_loop()
+    pending_sends: set[asyncio.Task[None]] = set()
 
     def _forward_intermediate(notification: _AgentTextNotification) -> None:
         async def _send() -> None:
             try:
-                await _run_blocking(_safe_send, api, chat_id, notification.text)
+                outbound_text = _format_intermediate_notification_text(notification)
+                await _run_blocking(_safe_send, api, chat_id, outbound_text)
             except Exception as exc:
                 _stdout_print(f"[warn] failed to forward intermediate codex notification: {exc}")
 
@@ -607,7 +644,9 @@ async def _run_with_progress_notifications(
             return
 
         if running_loop is loop:
-            loop.create_task(_send())
+            task = loop.create_task(_send())
+            pending_sends.add(task)
+            task.add_done_callback(pending_sends.discard)
             return
 
         asyncio.run_coroutine_threadsafe(_send(), loop)
@@ -619,6 +658,8 @@ async def _run_with_progress_notifications(
     try:
         return await orchestrator.handle_message(chat_id, user_id, text)
     finally:
+        if pending_sends:
+            await asyncio.gather(*list(pending_sends), return_exceptions=True)
         _ACTIVE_NOTIFICATION_HANDLER.reset(callback_token)
         if _ACTIVE_NOTIFICATION_HANDLER_FALLBACK is _forward_intermediate:
             _ACTIVE_NOTIFICATION_HANDLER_FALLBACK = None

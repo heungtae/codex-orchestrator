@@ -3,12 +3,34 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 
 class CodexExecutionError(RuntimeError):
     pass
+
+
+_ACTIVE_CODEX_AGENT_NAME: ContextVar[str | None] = ContextVar(
+    "active_codex_agent_name",
+    default=None,
+)
+
+
+@contextmanager
+def codex_agent_name_scope(agent_name: str | None):
+    cleaned = str(agent_name).strip() if isinstance(agent_name, str) else ""
+    token = _ACTIVE_CODEX_AGENT_NAME.set(cleaned or None)
+    try:
+        yield
+    finally:
+        _ACTIVE_CODEX_AGENT_NAME.reset(token)
+
+
+def get_active_codex_agent_name() -> str | None:
+    return _ACTIVE_CODEX_AGENT_NAME.get()
 
 
 class CodexExecutor(Protocol):

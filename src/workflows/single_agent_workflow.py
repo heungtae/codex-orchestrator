@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from core.models import BotSession, WorkflowResult
-from integrations.codex_executor import CodexExecutionError, CodexExecutor
+from integrations.codex_executor import CodexExecutionError, CodexExecutor, codex_agent_name_scope
 from workflows.types import DeveloperAgent, PlannerAgent, ReviewDecision, ReviewerAgent
 
 _MAX_REVIEW_FEEDBACK_CHARS = 1200
@@ -106,15 +106,16 @@ class LlmPlannerAgent:
         )
         if system_instructions is None:
             system_instructions = _DEFAULT_PLANNER_SYSTEM_INSTRUCTIONS
-        output = (
-            await self._executor.run(
-                prompt=prompt,
-                history=session.history,
-                system_instructions=system_instructions,
-                model=selected_model,
-                cwd=session.profile_working_directory,
-            )
-        ).strip()
+        with codex_agent_name_scope("single.planner"):
+            output = (
+                await self._executor.run(
+                    prompt=prompt,
+                    history=session.history,
+                    system_instructions=system_instructions,
+                    model=selected_model,
+                    cwd=session.profile_working_directory,
+                )
+            ).strip()
         if _looks_like_prompt_echo(output):
             raise CodexExecutionError(
                 "executor returned prompt-like planner output; check executor configuration"
@@ -150,15 +151,16 @@ class LlmDeveloperAgent:
         )
         if system_instructions is None:
             system_instructions = _DEFAULT_DEVELOPER_SYSTEM_INSTRUCTIONS
-        output = (
-            await self._executor.run(
-                prompt=prompt,
-                history=session.history,
-                system_instructions=system_instructions,
-                model=selected_model,
-                cwd=session.profile_working_directory,
-            )
-        ).strip()
+        with codex_agent_name_scope("single.developer"):
+            output = (
+                await self._executor.run(
+                    prompt=prompt,
+                    history=session.history,
+                    system_instructions=system_instructions,
+                    model=selected_model,
+                    cwd=session.profile_working_directory,
+                )
+            ).strip()
         if _looks_like_prompt_echo(output):
             raise CodexExecutionError(
                 "executor returned prompt-like developer output; check executor configuration"
@@ -196,15 +198,16 @@ class LlmReviewerAgent:
         if system_instructions is None:
             system_instructions = _DEFAULT_REVIEWER_SYSTEM_INSTRUCTIONS
 
-        raw = (
-            await self._executor.run(
-                prompt=prompt,
-                history=session.history,
-                system_instructions=system_instructions,
-                model=selected_model,
-                cwd=session.profile_working_directory,
-            )
-        ).strip()
+        with codex_agent_name_scope("single.reviewer"):
+            raw = (
+                await self._executor.run(
+                    prompt=prompt,
+                    history=session.history,
+                    system_instructions=system_instructions,
+                    model=selected_model,
+                    cwd=session.profile_working_directory,
+                )
+            ).strip()
         if _looks_like_prompt_echo(raw):
             raise CodexExecutionError(
                 "executor returned prompt-like reviewer output; check executor configuration"

@@ -328,8 +328,8 @@ class BotOrchestrator:
                 "/status",
                 "/profile list|<name>",
                 "/cancel",
-                "non-reserved /... and plain text are forwarded to Codex workflow",
-                f"session_working_directory: {working_directory}",
+                "and plain text are forwarded to Codex workflow",
+                f"\nsession_working_directory: {working_directory}",
             ]
         )
 
