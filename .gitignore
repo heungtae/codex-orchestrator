@@ -13,3 +13,11 @@ apps/orchestrator/.state/
 
 # OS
 .DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local tool state
+.codex-home/
