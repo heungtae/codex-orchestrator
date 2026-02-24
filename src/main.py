@@ -51,7 +51,12 @@ def _load_toml_payload(conf_path: Path) -> dict[str, Any]:
     try:
         import tomllib
     except Exception as exc:
-        raise RuntimeError("Python 3.11+ is required for conf.toml parsing (tomllib).") from exc
+        try:
+            import tomli as tomllib
+        except Exception as tomli_exc:
+            raise RuntimeError(
+                "TOML parser is required. Use Python 3.11+ or install package `tomli`."
+            ) from tomli_exc
 
     try:
         raw = conf_path.read_text(encoding="utf-8")
@@ -270,7 +275,7 @@ def build_orchestrator() -> BotOrchestrator:
 
     agent_factory = AgentFactory(executor=executor, max_review_rounds=3)
     single_workflow = agent_factory.create_single_workflow()
-    plan_workflow = agent_factory.create_plan_workflow(single_fallback_workflow=single_workflow)
+    plan_workflow = agent_factory.create_plan_workflow(single_workflow=single_workflow)
     return BotOrchestrator(
         router=CommandRouter(),
         session_manager=SessionManager(),

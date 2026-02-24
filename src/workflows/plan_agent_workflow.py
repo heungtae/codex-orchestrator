@@ -9,17 +9,30 @@ from typing import Any
 
 from core.models import BotSession, WorkflowResult
 from integrations.codex_executor import CodexExecutionError, CodexExecutor, codex_agent_name_scope
-from workflows.types import DeveloperAgent, PlannerAgent, ReviewDecision, ReviewerAgent, Workflow
+from workflows.types import (
+    DeveloperAgent,
+    PlannerAgent,
+    ReviewDecision,
+    ReviewerAgent,
+    SelectorAgent,
+    SelectorDecision,
+    Workflow,
+)
 
 _MAX_REVIEW_FEEDBACK_CHARS = 1200
 _MAX_PLANNER_OUTPUT_CHARS = 1500
 _MAX_HISTORY_ITEMS = 20
+_SELECTOR_AGENT_KEYS = ("plan.selector", "single.selector", "selector")
 _PLANNER_AGENT_KEYS = ("plan.planner", "single.planner", "planner")
 _DEVELOPER_AGENT_KEYS = ("plan.developer", "single.developer", "developer")
 _REVIEWER_AGENT_KEYS = ("plan.reviewer", "single.reviewer", "reviewer")
+_DEFAULT_SELECTOR_SYSTEM_INSTRUCTIONS = (
+    "You are Mode Selector Agent. Classify user requests to determine execution mode.\n"
+    "Return strict JSON only with keys: mode, reason."
+)
 _DEFAULT_PLANNER_SYSTEM_INSTRUCTIONS = (
-    "You are Plan Planner Agent. Decide which stages are required and provide concise handoff text. "
-    "Return strict JSON only."
+    "You are Plan Router Agent. Create implementation design for developer handoff.\n"
+    "Return concrete implementation steps and acceptance criteria."
 )
 _DEFAULT_DEVELOPER_SYSTEM_INSTRUCTIONS = (
     "You are Plan Developer Agent. Implement user requests and apply planner/reviewer guidance. "
@@ -49,16 +62,6 @@ _IGNORED_DIRS = {
 }
 
 
-@dataclass(frozen=True)
-class PlannerGateDecision:
-    use_single_agent: bool
-    need_planner_handoff: bool
-    need_developer: bool
-    need_reviewer: bool
-    reason: str
-    execution_handoff: str
-
-
 def _looks_like_prompt_echo(text: str) -> bool:
     lowered = text.lower()
     return (
@@ -75,17 +78,92 @@ def _looks_like_prompt_echo(text: str) -> bool:
             and "return strict json only." in lowered
         )
         or (
+            "you are mode selector agent." in lowered
+            and "return strict json only" in lowered
+        )
+        or (
             "user request:" in lowered
             and "review round:" in lowered
             and "reviewer feedback to apply:" in lowered
         )
         or (
             "return strict json object with keys" in lowered
-            and "need_planner_handoff" in lowered
-            and "need_developer" in lowered
-            and "need_reviewer" in lowered
+            and "mode" in lowered
+            and "reason" in lowered
         )
     )
+
+
+class LlmSelectorAgent:
+    def __init__(self, executor: CodexExecutor) -> None:
+        self._executor = executor
+
+    async def select_mode(
+        self,
+        *,
+        user_input: str,
+        session: BotSession,
+    ) -> SelectorDecision:
+        prompt = (
+            f"User request:\n{user_input}\n\n"
+            "Classify this request to determine execution mode.\n\n"
+            "Return strict JSON with keys:\n"
+            "- mode (string): 'single' or 'plan'\n"
+            "- reason (string): brief explanation (1 sentence)\n\n"
+            "Classification rules:\n"
+            "1. SINGLE MODE:\n"
+            "   - Questions: 'what is...', 'explain...', 'how to...'\n"
+            "   - Inspection: 'show me...', 'read file...', 'list...'\n"
+            "   - Quick fixes: 'fix typo', 'rename variable', 'add import'\n"
+            "   - Single file, < 20 lines change\n"
+            "   - No architecture impact\n\n"
+            "2. PLAN MODE:\n"
+            "   - New features: 'add...', 'implement...', 'create...'\n"
+            "   - Refactoring: 'restructure...', 'migrate...', 'redesign...'\n"
+            "   - Multi-file changes: > 2 files\n"
+            "   - Architecture changes: new modules, API design\n"
+            "   - Complex bugs: requires investigation\n\n"
+            "Default to single mode when uncertain.\n"
+            "Return JSON only."
+        )
+        selected_model = _select_agent_override(session.profile_agent_models, _SELECTOR_AGENT_KEYS)
+        if selected_model is None:
+            selected_model = session.profile_model
+        system_instructions = _select_agent_override(
+            session.profile_agent_system_prompts,
+            _SELECTOR_AGENT_KEYS,
+        )
+        if system_instructions is None:
+            system_instructions = _DEFAULT_SELECTOR_SYSTEM_INSTRUCTIONS
+        with codex_agent_name_scope("plan.selector"):
+            output = (
+                await self._executor.run(
+                    prompt=prompt,
+                    history=session.history,
+                    system_instructions=system_instructions,
+                    model=selected_model,
+                    cwd=session.profile_working_directory,
+                )
+            ).strip()
+        if _looks_like_prompt_echo(output):
+            raise CodexExecutionError(
+                "executor returned prompt-like selector output; check executor configuration"
+            )
+        return self._parse_selector_output(output)
+
+    @staticmethod
+    def _parse_selector_output(raw: str) -> SelectorDecision:
+        payload = _extract_json_object(raw)
+        if not isinstance(payload, dict):
+            return SelectorDecision(mode="single", reason="parse_failed; defaulting to single")
+
+        mode = str(payload.get("mode", "single")).strip().lower()
+        reason = str(payload.get("reason", "")).strip()
+
+        if mode not in ("single", "plan"):
+            mode = "single"
+
+        return SelectorDecision(mode=mode, reason=reason)
 
 
 class LlmPlannerAgent:
@@ -100,16 +178,13 @@ class LlmPlannerAgent:
     ) -> str:
         prompt = (
             f"User request:\n{user_input}\n\n"
-            "Decide which plan stages are required. Return strict JSON object with keys: "
-            "use_single_agent (boolean), need_planner_handoff (boolean), "
-            "need_developer (boolean), need_reviewer (boolean), reason (string), "
-            "execution_handoff (string).\n"
-            "Rules:\n"
-            "- If request is simple and plan/review stages are unnecessary, set use_single_agent=true.\n"
-            "- If implementation/code change is not needed, set need_developer=false and need_reviewer=false.\n"
-            "- If developer is required and review is useful, set need_reviewer=true.\n"
-            "- execution_handoff must be concise actionable steps when need_planner_handoff=true.\n"
-            "Return JSON only."
+            "Create an implementation design for developer handoff.\n\n"
+            "Provide:\n"
+            "1. Implementation steps (numbered)\n"
+            "2. Files to modify/create\n"
+            "3. Key considerations\n"
+            "4. Acceptance criteria\n\n"
+            "Be concrete and specific. No JSON required."
         )
         selected_model = _select_agent_override(session.profile_agent_models, _PLANNER_AGENT_KEYS)
         if selected_model is None:
@@ -253,264 +328,191 @@ class LlmReviewerAgent:
 
 @dataclass
 class PlanWorkflow:
+    selector: SelectorAgent
     planner: PlannerAgent
     developer: DeveloperAgent
     reviewer: ReviewerAgent
-    single_fallback_workflow: Workflow | None = None
+    single_workflow: Workflow
     max_review_rounds: int = 3
     review_only_with_artifacts: bool = True
     workspace_dir: Path | None = None
 
     async def run(self, input_text: str, session: BotSession) -> WorkflowResult:
         session.history = self._sanitize_history(session.history)
-        planner_output = await self.planner.plan(user_input=input_text, session=session)
-        gate = self._parse_planner_gate(planner_output)
 
-        if gate.use_single_agent and self.single_fallback_workflow is not None:
-            fallback_result = await self.single_fallback_workflow.run(input_text=input_text, session=session)
-            fallback_metadata = fallback_result.get("metadata")
-            if not isinstance(fallback_metadata, dict):
-                fallback_metadata = {}
-            fallback_metadata["planner_output"] = planner_output
-            fallback_metadata["planner_gate"] = {
-                "use_single_agent": gate.use_single_agent,
-                "need_planner_handoff": gate.need_planner_handoff,
-                "need_developer": gate.need_developer,
-                "need_reviewer": gate.need_reviewer,
-                "reason": gate.reason,
-            }
-            fallback_metadata["delegated_to"] = "single.developer"
-            return WorkflowResult(
-                output_text=fallback_result.get("output_text", ""),
-                next_history=fallback_result.get("next_history", session.history),
-                review_round=int(fallback_result.get("review_round", 0) or 0),
-                review_result=fallback_result.get("review_result", "approved"),
-                metadata=fallback_metadata,
+        selector_decision = await self.selector.select_mode(user_input=input_text, session=session)
+
+        stage_transitions: list[dict[str, Any]] = [
+            {"from": "start", "to": "selector", "round": 0, "status": "completed"},
+        ]
+
+        if selector_decision.mode == "single":
+            stage_transitions.append(
+                {
+                    "from": "selector",
+                    "to": "single_workflow",
+                    "round": 0,
+                    "status": "delegated",
+                    "reason": selector_decision.reason,
+                }
             )
+            result = await self.single_workflow.run(input_text, session)
+            result["metadata"] = {
+                **result.get("metadata", {}),
+                "selector_decision": {
+                    "mode": selector_decision.mode,
+                    "reason": selector_decision.reason,
+                },
+                "stage_transitions": stage_transitions,
+                "delegated_to": "single_workflow",
+            }
+            return result
 
-        clipped_plan = self._clip_planner_output(gate.execution_handoff)
+        stage_transitions.append(
+            {
+                "from": "selector",
+                "to": "planner",
+                "round": 0,
+                "status": "completed",
+                "reason": selector_decision.reason,
+            }
+        )
+
+        planner_output = await self.planner.plan(user_input=input_text, session=session)
+        clipped_plan = self._clip_planner_output(planner_output)
+
         execution_input = self._compose_execution_input(
             input_text=input_text,
             planner_output=clipped_plan,
-            include_planner_handoff=gate.need_planner_handoff,
         )
 
         review_feedback: str | None = None
         candidate_output = ""
         last_decision = ReviewDecision(result="approved", feedback="")
         rounds: list[dict[str, Any]] = []
-        stage_transitions: list[dict[str, Any]] = [
-            {"from": "start", "to": "planner", "round": 0, "status": "completed"},
-        ]
         review_result = "approved"
         review_round = 0
         previous_feedback: str | None = None
         previous_candidate_output: str | None = None
 
-        if not gate.need_developer:
+        for round_index in range(1, self.max_review_rounds + 1):
+            from_stage = "planner" if round_index == 1 else "reviewer"
             stage_transitions.append(
                 {
-                    "from": "planner",
-                    "to": "completed",
-                    "round": 0,
-                    "status": "approved",
-                    "reason": "planner_gate_no_developer",
+                    "from": from_stage,
+                    "to": "developer",
+                    "round": round_index,
+                    "status": "completed",
                 }
             )
-            candidate_output = (
-                clipped_plan
-                or gate.reason
-                or "planner gate: no developer stage required for this request"
+            before_snapshot = (
+                self._snapshot_workspace(session.profile_working_directory)
+                if self.review_only_with_artifacts
+                else {}
             )
+            candidate_output = await self.developer.develop(
+                user_input=execution_input,
+                session=session,
+                round_index=round_index,
+                review_feedback=review_feedback,
+            )
+
+            stage_transitions.append(
+                {
+                    "from": "developer",
+                    "to": "reviewer",
+                    "round": round_index,
+                    "status": "pending",
+                }
+            )
+            artifacts: list[str] = []
+            if self.review_only_with_artifacts:
+                after_snapshot = self._snapshot_workspace(session.profile_working_directory)
+                artifacts = self._detect_artifacts(before_snapshot, after_snapshot)
+
+            decision = await self.reviewer.review(
+                user_input=execution_input,
+                candidate_output=candidate_output,
+                artifacts=artifacts,
+                session=session,
+                round_index=round_index,
+            )
+            clipped_feedback = self._clip_feedback(decision.feedback)
+            decision = ReviewDecision(result=decision.result, feedback=clipped_feedback)
             rounds.append(
                 {
-                    "round": 0,
-                    "result": "approved",
-                    "feedback": "review skipped: developer stage not required",
-                    "artifacts": [],
+                    "round": round_index,
+                    "result": decision.result,
+                    "feedback": decision.feedback,
+                    "artifacts": artifacts,
                 }
             )
-        else:
-            for round_index in range(1, self.max_review_rounds + 1):
-                from_stage = "planner" if round_index == 1 else "reviewer"
-                stage_transitions.append(
-                    {
-                        "from": from_stage,
-                        "to": "developer",
-                        "round": round_index,
-                        "status": "completed",
-                    }
-                )
-                before_snapshot = (
-                    self._snapshot_workspace(session.profile_working_directory)
-                    if gate.need_reviewer and self.review_only_with_artifacts
-                    else {}
-                )
-                candidate_output = await self.developer.develop(
-                    user_input=execution_input,
-                    session=session,
-                    round_index=round_index,
-                    review_feedback=review_feedback,
-                )
+            last_decision = decision
+            stage_transitions[-1]["status"] = decision.result
 
-                if not gate.need_reviewer:
-                    last_decision = ReviewDecision(
-                        result="approved",
-                        feedback="review skipped: planner gate disabled reviewer",
-                    )
-                    rounds.append(
-                        {
-                            "round": round_index,
-                            "result": last_decision.result,
-                            "feedback": last_decision.feedback,
-                            "artifacts": [],
-                        }
-                    )
-                    stage_transitions.append(
-                        {
-                            "from": "developer",
-                            "to": "reviewer",
-                            "round": round_index,
-                            "status": "skipped",
-                            "reason": "planner_gate_no_reviewer",
-                        }
-                    )
-                    stage_transitions.append(
-                        {
-                            "from": "reviewer",
-                            "to": "completed",
-                            "round": round_index,
-                            "status": "approved",
-                        }
-                    )
-                    review_result = "approved"
-                    review_round = round_index
-                    break
-
-                stage_transitions.append(
-                    {
-                        "from": "developer",
-                        "to": "reviewer",
-                        "round": round_index,
-                        "status": "pending",
-                    }
-                )
-                artifacts: list[str] = []
-                if self.review_only_with_artifacts:
-                    after_snapshot = self._snapshot_workspace(session.profile_working_directory)
-                    artifacts = self._detect_artifacts(before_snapshot, after_snapshot)
-
-                if self.review_only_with_artifacts and not artifacts:
-                    last_decision = ReviewDecision(
-                        result="approved",
-                        feedback="review skipped: no implementation artifacts detected",
-                    )
-                    stage_transitions[-1]["status"] = "skipped"
-                    stage_transitions[-1]["result"] = "approved"
-                    stage_transitions[-1]["reason"] = "no_artifacts"
-                    stage_transitions.append(
-                        {
-                            "from": "reviewer",
-                            "to": "completed",
-                            "round": round_index,
-                            "status": "approved",
-                        }
-                    )
-                    rounds.append(
-                        {
-                            "round": round_index,
-                            "result": last_decision.result,
-                            "feedback": last_decision.feedback,
-                            "artifacts": [],
-                        }
-                    )
-                    review_result = "approved"
-                    review_round = round_index
-                    break
-
-                decision = await self.reviewer.review(
-                    user_input=execution_input,
-                    candidate_output=candidate_output,
-                    artifacts=artifacts,
-                    session=session,
-                    round_index=round_index,
-                )
-                clipped_feedback = self._clip_feedback(decision.feedback)
-                decision = ReviewDecision(result=decision.result, feedback=clipped_feedback)
-                rounds.append(
-                    {
-                        "round": round_index,
-                        "result": decision.result,
-                        "feedback": decision.feedback,
-                        "artifacts": artifacts,
-                    }
-                )
-                last_decision = decision
-                stage_transitions[-1]["status"] = decision.result
-
-                if decision.result == "approved":
-                    stage_transitions.append(
-                        {
-                            "from": "reviewer",
-                            "to": "completed",
-                            "round": round_index,
-                            "status": "approved",
-                        }
-                    )
-                    review_result = "approved"
-                    review_round = round_index
-                    break
-
-                current_candidate = candidate_output.strip()
-                if previous_candidate_output and current_candidate == previous_candidate_output:
-                    stage_transitions.append(
-                        {
-                            "from": "reviewer",
-                            "to": "completed",
-                            "round": round_index,
-                            "status": "max_rounds_reached",
-                            "reason": "same_candidate_output",
-                        }
-                    )
-                    review_result = "max_rounds_reached"
-                    review_round = round_index
-                    break
-
-                if previous_feedback and clipped_feedback and clipped_feedback == previous_feedback:
-                    stage_transitions.append(
-                        {
-                            "from": "reviewer",
-                            "to": "completed",
-                            "round": round_index,
-                            "status": "max_rounds_reached",
-                            "reason": "same_feedback",
-                        }
-                    )
-                    review_result = "max_rounds_reached"
-                    review_round = round_index
-                    break
-
-                review_feedback = clipped_feedback
-                previous_feedback = clipped_feedback
-                previous_candidate_output = current_candidate
-            else:
+            if decision.result == "approved":
                 stage_transitions.append(
                     {
                         "from": "reviewer",
                         "to": "completed",
-                        "round": self.max_review_rounds,
+                        "round": round_index,
+                        "status": "approved",
+                    }
+                )
+                review_result = "approved"
+                review_round = round_index
+                break
+
+            current_candidate = candidate_output.strip()
+            if previous_candidate_output and current_candidate == previous_candidate_output:
+                stage_transitions.append(
+                    {
+                        "from": "reviewer",
+                        "to": "completed",
+                        "round": round_index,
                         "status": "max_rounds_reached",
+                        "reason": "same_candidate_output",
                     }
                 )
                 review_result = "max_rounds_reached"
-                review_round = self.max_review_rounds
+                review_round = round_index
+                break
+
+            if previous_feedback and clipped_feedback and clipped_feedback == previous_feedback:
+                stage_transitions.append(
+                    {
+                        "from": "reviewer",
+                        "to": "completed",
+                        "round": round_index,
+                        "status": "max_rounds_reached",
+                        "reason": "same_feedback",
+                    }
+                )
+                review_result = "max_rounds_reached"
+                review_round = round_index
+                break
+
+            review_feedback = clipped_feedback
+            previous_feedback = clipped_feedback
+            previous_candidate_output = current_candidate
+        else:
+            stage_transitions.append(
+                {
+                    "from": "reviewer",
+                    "to": "completed",
+                    "round": self.max_review_rounds,
+                    "status": "max_rounds_reached",
+                }
+            )
+            review_result = "max_rounds_reached"
+            review_round = self.max_review_rounds
 
         if last_decision.result == "approved" and review_result != "max_rounds_reached":
             review_result = "approved"
 
         base_output = candidate_output.strip()
         if not base_output:
-            base_output = clipped_plan or gate.reason
+            base_output = clipped_plan
 
         final_output = self._build_user_output(
             candidate_output=base_output,
@@ -532,12 +534,9 @@ class PlanWorkflow:
             metadata={
                 "plan": clipped_plan,
                 "planner_output": planner_output,
-                "planner_gate": {
-                    "use_single_agent": gate.use_single_agent,
-                    "need_planner_handoff": gate.need_planner_handoff,
-                    "need_developer": gate.need_developer,
-                    "need_reviewer": gate.need_reviewer,
-                    "reason": gate.reason,
+                "selector_decision": {
+                    "mode": selector_decision.mode,
+                    "reason": selector_decision.reason,
                 },
                 "rounds": rounds,
                 "stage_transitions": stage_transitions,
@@ -553,8 +552,7 @@ class PlanWorkflow:
     ) -> str:
         last_round = int(rounds[-1]["round"]) if rounds else 0
         summary_line = (
-            "[plan-review] "
-            "stages=planner>developer>reviewer, "
+            f"[plan-workflow] "
             f"rounds={last_round}/{self.max_review_rounds}, "
             f"result={review_result}"
         )
@@ -593,50 +591,10 @@ class PlanWorkflow:
         *,
         input_text: str,
         planner_output: str,
-        include_planner_handoff: bool,
     ) -> str:
-        if not include_planner_handoff or not planner_output:
+        if not planner_output:
             return input_text
         return f"{input_text}\n\nPlanner handoff:\n{planner_output}"
-
-    @staticmethod
-    def _parse_planner_gate(raw: str) -> PlannerGateDecision:
-        payload = _extract_json_object(raw)
-        if not isinstance(payload, dict):
-            return PlannerGateDecision(
-                use_single_agent=False,
-                need_planner_handoff=True,
-                need_developer=True,
-                need_reviewer=True,
-                reason="planner_gate_parse_failed",
-                execution_handoff=raw.strip(),
-            )
-
-        use_single_agent = _bool_or_default(payload.get("use_single_agent"), False)
-        need_planner_handoff = _bool_or_default(payload.get("need_planner_handoff"), True)
-        need_developer = _bool_or_default(payload.get("need_developer"), True)
-        need_reviewer = _bool_or_default(payload.get("need_reviewer"), True)
-        reason = _string_or_default(payload.get("reason"), "")
-        execution_handoff = _string_or_default(payload.get("execution_handoff"), "")
-        if not execution_handoff:
-            execution_handoff = _string_or_default(payload.get("plan"), "")
-
-        if not need_developer:
-            need_reviewer = False
-            use_single_agent = True
-        if use_single_agent:
-            need_reviewer = False
-        if not need_planner_handoff:
-            execution_handoff = ""
-
-        return PlannerGateDecision(
-            use_single_agent=use_single_agent,
-            need_planner_handoff=need_planner_handoff,
-            need_developer=need_developer,
-            need_reviewer=need_reviewer,
-            reason=reason,
-            execution_handoff=execution_handoff,
-        )
 
     def _snapshot_workspace(self, profile_working_directory: str | None) -> dict[str, tuple[int, int]]:
         if profile_working_directory:
@@ -717,26 +675,6 @@ def _extract_json_object(raw: str) -> dict[str, Any] | None:
         if isinstance(parsed, dict):
             return parsed
     return None
-
-
-def _string_or_default(value: Any, default: str) -> str:
-    if isinstance(value, str):
-        cleaned = value.strip()
-        if cleaned:
-            return cleaned
-    return default
-
-
-def _bool_or_default(value: Any, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        cleaned = value.strip().lower()
-        if cleaned in {"true", "1", "yes", "y", "on"}:
-            return True
-        if cleaned in {"false", "0", "no", "n", "off"}:
-            return False
-    return default
 
 
 def _select_agent_override(

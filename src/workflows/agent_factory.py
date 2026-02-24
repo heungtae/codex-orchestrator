@@ -4,10 +4,11 @@ from dataclasses import dataclass
 
 from integrations.codex_executor import CodexExecutor
 from workflows.multi_agent_workflow import MultiAgentWorkflow
-from workflows.plan_workflow import (
+from workflows.plan_agent_workflow import (
     LlmDeveloperAgent,
     LlmPlannerAgent,
     LlmReviewerAgent,
+    LlmSelectorAgent,
     PlanWorkflow,
 )
 from workflows.single_agent_workflow import LlmSingleDeveloperAgent, SingleAgentWorkflow
@@ -23,19 +24,24 @@ class AgentFactory:
         developer = LlmSingleDeveloperAgent(executor=self.executor)
         return SingleAgentWorkflow(developer=developer)
 
+    def create_selector_agent(self) -> LlmSelectorAgent:
+        return LlmSelectorAgent(executor=self.executor)
+
     def create_plan_workflow(
         self,
         *,
-        single_fallback_workflow: Workflow | None = None,
+        single_workflow: Workflow,
     ) -> PlanWorkflow:
+        selector = LlmSelectorAgent(executor=self.executor)
         planner = LlmPlannerAgent(executor=self.executor)
         developer = LlmDeveloperAgent(executor=self.executor)
         reviewer = LlmReviewerAgent(executor=self.executor)
         return PlanWorkflow(
+            selector=selector,
             planner=planner,
             developer=developer,
             reviewer=reviewer,
-            single_fallback_workflow=single_fallback_workflow,
+            single_workflow=single_workflow,
             max_review_rounds=self.max_review_rounds,
         )
 

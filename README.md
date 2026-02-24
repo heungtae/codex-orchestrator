@@ -21,7 +21,7 @@ Telegram Bot에서 Codex 워크플로우(single/plan/multi)를 실행하기 위�
 - `tests`: `unittest` 테스트
 
 ## 요구 사항
-- Python 3.11+
+- Python 3.10+
 - `npx` + `codex mcp-server`를 실행할 수 있는 환경
 - Telegram Bot 토큰
 

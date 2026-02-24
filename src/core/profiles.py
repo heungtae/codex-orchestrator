@@ -181,7 +181,12 @@ def _load_toml(path: Path) -> dict[str, Any]:
     try:
         import tomllib
     except Exception as exc:
-        raise RuntimeError("Python 3.11+ is required for conf.toml parsing (tomllib).") from exc
+        try:
+            import tomli as tomllib
+        except Exception as tomli_exc:
+            raise RuntimeError(
+                "TOML parser is required. Use Python 3.11+ or install package `tomli`."
+            ) from tomli_exc
 
     try:
         raw = path.read_text(encoding="utf-8")

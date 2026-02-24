@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from core.command_router import CommandRouter
-from core.models import BotSession, RouteResult
+from core.models import BotMode, BotSession, RouteResult
 from core.profiles import ExecutionProfile, ProfileRegistry
 from core.session_manager import SessionManager
 from core.trace_logger import TraceLogger
@@ -95,6 +95,22 @@ class BotOrchestrator:
         )
 
         return output_text
+
+    async def preview_workflow_mode(
+        self,
+        chat_id: str | int,
+        user_id: str | int,
+        text: str | None,
+    ) -> BotMode | None:
+        route = self.router.route(text)
+        if route.kind == "bot_command":
+            return None
+
+        async with self.session_manager.lock(chat_id=chat_id, user_id=user_id):
+            session = await self.session_manager.load(chat_id=chat_id, user_id=user_id)
+            if self._ensure_session_profile(session):
+                await self.session_manager.save(session)
+            return session.mode
 
     async def _handle_bot_command(
         self,

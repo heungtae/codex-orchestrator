@@ -53,6 +53,20 @@ class _TrackingOrchestrator:
         return "done"
 
 
+class _ModeAwareOrchestrator:
+    def __init__(self, mode: str = "plan", output: str = "done") -> None:
+        self.mode = mode
+        self.output = output
+        self.handle_calls = 0
+
+    async def preview_workflow_mode(self, chat_id: str, user_id: str, text: str) -> str:
+        return self.mode
+
+    async def handle_message(self, chat_id: str, user_id: str, text: str) -> str:
+        self.handle_calls += 1
+        return self.output
+
+
 class TelegramPollingRunnerProgressTests(unittest.TestCase):
     def test_cancel_inflight_request_cancels_task(self) -> None:
         class _DummyOrchestrator:
@@ -155,6 +169,43 @@ class TelegramPollingRunnerProgressTests(unittest.TestCase):
         asyncio.run(_scenario())
         self.assertEqual(orchestrator.calls, 1)
         self.assertEqual(api.messages, [("100", "done")])
+
+    def test_process_inbound_request_sends_mode_notice_before_output(self) -> None:
+        orchestrator = _ModeAwareOrchestrator(mode="plan", output="done")
+        api = _FakeTelegramApi()
+
+        async def _fake_run_blocking(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        async def _scenario() -> None:
+            with (
+                patch("scripts.telegram_polling_runner._close_codex_mcp") as mocked_close,
+                patch("scripts.telegram_polling_runner._run_blocking", side_effect=_fake_run_blocking),
+            ):
+                await _process_inbound_request(
+                    orchestrator=orchestrator,
+                    api=api,
+                    chat_id="100",
+                    user_id="200",
+                    text="hello",
+                    progress_notify=True,
+                    progress_initial_delay_sec=0.1,
+                    progress_interval_sec=0.1,
+                    progress_message_template="working {elapsed_sec}s",
+                )
+                mocked_close.assert_called_once_with(orchestrator)
+
+        from scripts.telegram_polling_runner import _process_inbound_request
+
+        asyncio.run(_scenario())
+        self.assertEqual(orchestrator.handle_calls, 1)
+        self.assertEqual(
+            api.messages,
+            [
+                ("100", "[mode] this request will run in plan mode."),
+                ("100", "done"),
+            ],
+        )
 
     def test_run_polling_creates_conf_before_token_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -391,6 +442,32 @@ poll_timeout = "30"
         printed = mocked_print.call_args.args[0]
         self.assertIn("agent=single.reviewer", printed)
 
+    def test_codex_event_validation_filter_prefers_agent_context_over_payload_agent(self) -> None:
+        filter_ = _CodexEventValidationFilter()
+        record = logging.LogRecord(
+            name="root",
+            level=logging.WARNING,
+            pathname=__file__,
+            lineno=1,
+            msg=(
+                "Failed to validate notification: validation error. "
+                "Message was: method='codex/event' "
+                "params={'msg': {'type': 'item_completed', 'item': {'type': 'AgentMessage', "
+                "'id': 'msg_1', 'content': [{'type': 'Text', 'text': 'hello world'}], "
+                "'phase': 'commentary', 'agent_name': 'plan.planner'}}} jsonrpc='2.0'"
+            ),
+            args=(),
+            exc_info=None,
+        )
+
+        with codex_agent_name_scope("plan.developer"):
+            with patch("builtins.print") as mocked_print:
+                allowed = filter_.filter(record)
+
+        self.assertFalse(allowed)
+        printed = mocked_print.call_args.args[0]
+        self.assertIn("agent=plan.developer", printed)
+
     def test_codex_event_validation_filter_prints_final_answer_to_stdout(self) -> None:
         filter_ = _CodexEventValidationFilter()
         record = logging.LogRecord(
@@ -420,7 +497,7 @@ poll_timeout = "30"
         self.assertIn("text=done", printed)
         self.assertEqual(mocked_print.call_args.kwargs, {"flush": True})
 
-    def test_codex_event_validation_filter_dispatches_non_final_only(self) -> None:
+    def test_codex_event_validation_filter_dispatches_commentary_and_final(self) -> None:
         filter_ = _CodexEventValidationFilter()
         delivered: list[tuple[str, str, str]] = []
 
@@ -472,7 +549,13 @@ poll_timeout = "30"
         finally:
             _ACTIVE_NOTIFICATION_HANDLER.reset(token)
 
-        self.assertEqual(delivered, [("msg_mid", "commentary", "progress")])
+        self.assertEqual(
+            delivered,
+            [
+                ("msg_mid", "commentary", "progress"),
+                ("msg_final", "final_answer", "final"),
+            ],
+        )
 
     def test_codex_event_validation_filter_ignores_other_event_types(self) -> None:
         filter_ = _CodexEventValidationFilter()

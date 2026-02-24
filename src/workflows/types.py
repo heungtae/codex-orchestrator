@@ -7,9 +7,25 @@ from core.models import BotSession, WorkflowResult
 
 
 @dataclass
+class SelectorDecision:
+    mode: Literal["single", "plan"]
+    reason: str
+
+
+@dataclass
 class ReviewDecision:
     result: Literal["approved", "needs_changes"]
     feedback: str
+
+
+class SelectorAgent(Protocol):
+    async def select_mode(
+        self,
+        *,
+        user_input: str,
+        session: BotSession,
+    ) -> SelectorDecision:
+        ...
 
 
 class PlannerAgent(Protocol):

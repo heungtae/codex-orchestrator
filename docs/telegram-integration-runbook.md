@@ -13,7 +13,7 @@
 - 기능 설계 문서 수준의 워크플로우 설명
 
 ## 2) 사전 준비
-- Python 3.11+
+- Python 3.10+
 - Telegram 계정
 - `npx` 및 `codex mcp-server` 실행 가능 환경
 - 레포 루트 경로 접근

@@ -1,7 +1,7 @@
-Metadata-Version: 2.1
-Name: codex-orchestrator
-Version: 0.1.5
-Summary: Telegram orchestrator for running Codex single/multi-agent workflows
+Metadata-Version: 2.4
+Name: codex_orchestrator
+Version: 0.1.7
+Summary: Telegram orchestrator for running Codex single/plan/multi-agent workflows
 License:                                  Apache License
                                    Version 2.0, January 2004
                                 http://www.apache.org/licenses/
@@ -216,6 +216,9 @@ Classifier: Topic :: Communications :: Chat
 Requires-Python: >=3.11
 Description-Content-Type: text/markdown
 License-File: LICENSE
+Requires-Dist: mcp
+Requires-Dist: python-dotenv
+Dynamic: license-file
 
 # codex-orchestrator
 

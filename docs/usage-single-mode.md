@@ -10,7 +10,7 @@ Telegram 연동부터 실제 채팅 운영 절차까지는 `docs/telegram-integr
 - 참고: Telegram long polling 실행 스크립트(`scripts/telegram_polling_runner.py`)가 포함되어 있으며, `BotOrchestrator.handle_message()`로도 동일 로직을 직접 호출할 수 있습니다.
 
 ## 2. 요구 환경
-- Python 3.11+
+- Python 3.10+
 - MCP Python SDK (`mcp` 패키지)
 - `npx` 또는 `codex mcp-server`를 실행할 수 있는 환경
 

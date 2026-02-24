@@ -244,6 +244,24 @@ class OrchestratorTests(unittest.TestCase):
             self.assertIn("last_run: error", status)
             self.assertIn("last_error: cancelled", status)
 
+    def test_preview_workflow_mode_reports_current_mode_for_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            orchestrator = self._build(Path(tmp))
+
+            default_mode = asyncio.run(orchestrator.preview_workflow_mode("1", "2", "do work"))
+            self.assertEqual(default_mode, "single")
+
+            asyncio.run(orchestrator.handle_message("1", "2", "/mode plan"))
+            plan_mode = asyncio.run(orchestrator.preview_workflow_mode("1", "2", "do work"))
+            self.assertEqual(plan_mode, "plan")
+
+    def test_preview_workflow_mode_returns_none_for_bot_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            orchestrator = self._build(Path(tmp))
+
+            mode = asyncio.run(orchestrator.preview_workflow_mode("1", "2", "/status"))
+            self.assertIsNone(mode)
+
 
 if __name__ == "__main__":
     unittest.main()

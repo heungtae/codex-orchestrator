@@ -315,6 +315,12 @@ class _CodexEventValidationFilter(logging.Filter):
         msg: dict[str, Any],
         item: dict[str, Any],
     ) -> str | None:
+        scoped_agent_name = get_active_codex_agent_name()
+        if isinstance(scoped_agent_name, str):
+            normalized_scoped = scoped_agent_name.strip()
+            if normalized_scoped:
+                return normalized_scoped
+
         keys = ("agent_name", "agent", "agentName", "role_name", "role")
         containers: list[dict[str, Any]] = [item, msg, params]
         for node in (item.get("metadata"), msg.get("metadata"), params.get("metadata")):
@@ -329,7 +335,7 @@ class _CodexEventValidationFilter(logging.Filter):
                     if normalized:
                         return normalized
 
-        return get_active_codex_agent_name()
+        return None
 
     @staticmethod
     def _format_agent_text_notification(notification: _AgentTextNotification) -> str:
@@ -344,9 +350,6 @@ class _CodexEventValidationFilter(logging.Filter):
 
     @staticmethod
     def _dispatch_intermediate_notification(notification: _AgentTextNotification) -> None:
-        if notification.phase == "final_answer":
-            return
-
         callback = _ACTIVE_NOTIFICATION_HANDLER.get()
         if callback is None:
             callback = _ACTIVE_NOTIFICATION_HANDLER_FALLBACK
@@ -394,7 +397,12 @@ def _load_toml_payload(conf_path: Path) -> dict[str, Any]:
     try:
         import tomllib
     except Exception as exc:
-        raise RuntimeError("Python 3.11+ is required for conf.toml parsing (tomllib).") from exc
+        try:
+            import tomli as tomllib
+        except Exception as tomli_exc:
+            raise RuntimeError(
+                "TOML parser is required. Use Python 3.11+ or install package `tomli`."
+            ) from tomli_exc
 
     try:
         payload = tomllib.loads(conf_path.read_text(encoding="utf-8"))
@@ -613,6 +621,28 @@ def _format_intermediate_notification_text(notification: _AgentTextNotification)
     return notification.text
 
 
+async def _resolve_workflow_mode_notice(
+    *,
+    orchestrator: Any,
+    chat_id: str,
+    user_id: str,
+    text: str,
+) -> str | None:
+    preview = getattr(orchestrator, "preview_workflow_mode", None)
+    if not callable(preview):
+        return None
+
+    try:
+        mode = await preview(chat_id, user_id, text)
+    except Exception as exc:
+        _stdout_print(f"[warn] failed to preview workflow mode: {exc}")
+        return None
+
+    if mode in ("single", "plan"):
+        return f"[mode] this request will run in {mode} mode."
+    return None
+
+
 async def _run_with_progress_notifications(
     *,
     orchestrator: Any,
@@ -635,7 +665,7 @@ async def _run_with_progress_notifications(
                 outbound_text = _format_intermediate_notification_text(notification)
                 await _run_blocking(_safe_send, api, chat_id, outbound_text)
             except Exception as exc:
-                _stdout_print(f"[warn] failed to forward intermediate codex notification: {exc}")
+                _stdout_print(f"[warn] failed to forward codex notification: {exc}")
 
         try:
             running_loop = asyncio.get_running_loop()
@@ -677,6 +707,15 @@ async def _process_inbound_request(
     progress_interval_sec: float,
     progress_message_template: str,
 ) -> None:
+    mode_notice = await _resolve_workflow_mode_notice(
+        orchestrator=orchestrator,
+        chat_id=chat_id,
+        user_id=user_id,
+        text=text,
+    )
+    if mode_notice:
+        await _run_blocking(_safe_send, api, chat_id, mode_notice)
+
     try:
         output = await _run_with_progress_notifications(
             orchestrator=orchestrator,
