@@ -24,7 +24,6 @@ class BotOrchestrator:
     trace_logger: TraceLogger
     single_workflow: Workflow
     plan_workflow: Workflow
-    multi_workflow: Workflow
     codex_mcp: CodexMcpServer
     working_directory: str | None = None
     profile_registry: ProfileRegistry = field(default_factory=ProfileRegistry.build_default)
@@ -120,8 +119,12 @@ class BotOrchestrator:
         route: RouteResult,
     ) -> tuple[str, str]:
         if route.command == "start":
+            async with self.session_manager.lock(chat_id=chat_id, user_id=user_id):
+                session = await self.session_manager.load(chat_id=chat_id, user_id=user_id)
+                current_mode = session.mode
             return (
                 self._help_text(
+                    mode=current_mode,
                     working_directory=self._resolve_working_directory(self.working_directory)
                 ),
                 "single",
@@ -129,22 +132,22 @@ class BotOrchestrator:
 
         if route.command == "mode":
             mode = route.args[0] if route.args else ""
-            if mode not in ("single", "plan", "multi"):
-                return "usage: /mode single|plan|multi", "single"
+            if mode not in ("single", "plan"):
+                return "[Error]: usage=/mode single|plan", "plan"
 
             async with self.session_manager.lock(chat_id=chat_id, user_id=user_id):
                 session = await self.session_manager.load(chat_id=chat_id, user_id=user_id)
                 session.mode = mode
                 session.last_error = None
                 await self.session_manager.save(session)
-            return f"mode set to {mode}", mode
+            return f"[Mode]: {mode}", mode
 
         if route.command == "new":
             async with self.session_manager.lock(chat_id=chat_id, user_id=user_id):
                 session = await self.session_manager.reset(chat_id=chat_id, user_id=user_id)
                 self._apply_profile_to_session(session, self.profile_registry.default_profile())
                 await self.session_manager.save(session)
-            return "session reset. mode=single", session.mode
+            return f"[Session]: reset, mode={session.mode}", session.mode
 
         if route.command == "status":
             async with self.session_manager.lock(chat_id=chat_id, user_id=user_id):
@@ -161,7 +164,7 @@ class BotOrchestrator:
                     session = await self.session_manager.load(chat_id=chat_id, user_id=user_id)
                     if self._ensure_session_profile(session):
                         await self.session_manager.save(session)
-                return "usage: /profile list|<name>", session.mode
+                return "[Error]: usage=/profile list|<name>", session.mode
 
             async with self.session_manager.lock(chat_id=chat_id, user_id=user_id):
                 session = await self.session_manager.load(chat_id=chat_id, user_id=user_id)
@@ -176,7 +179,7 @@ class BotOrchestrator:
                 if profile is None:
                     if changed:
                         await self.session_manager.save(session)
-                    return f"profile not found: {profile_arg}\nusage: /profile list|<name>", session.mode
+                    return f"[Error]: profile not found: {profile_arg}", session.mode
 
                 self._apply_profile_to_session(session, profile)
                 session.last_error = None
@@ -185,9 +188,9 @@ class BotOrchestrator:
                 working_directory_text = session.profile_working_directory or "-"
                 return (
                     (
-                        f"profile set to {session.profile_name}\n"
-                        f"model: {model_text}\n"
-                        f"working_directory: {working_directory_text}"
+                        f"[Profile]: {session.profile_name}\n"
+                        f"model={model_text}\n"
+                        f"working_directory={working_directory_text}"
                     ),
                     session.mode,
                 )
@@ -210,12 +213,12 @@ class BotOrchestrator:
                             stale_session.run_lock = False
                             await self.session_manager.save(stale_session)
                             mode = stale_session.mode
-                return "no running task to cancel.", mode
+                return "[Cancel]: no running task", mode
 
             running_task.cancel()
-            return "cancel requested.", mode
+            return "[Cancel]: requested", mode
 
-        return "unsupported command", "single"
+        return "[Error]: unsupported command", "single"
 
     async def _handle_workflow_message(
         self,
@@ -243,10 +246,8 @@ class BotOrchestrator:
             await self.session_manager.save(session)
             if session.mode == "single":
                 workflow = self.single_workflow
-            elif session.mode == "plan":
-                workflow = self.plan_workflow
             else:
-                workflow = self.multi_workflow
+                workflow = self.plan_workflow
             mode = session.mode
             session_id = session.session_id
 
@@ -281,7 +282,7 @@ class BotOrchestrator:
                 latest.last_error = "cancelled"
                 latest.run_lock = False
                 await self.session_manager.save(latest)
-            return ("request canceled.", mode, latest.last_review_round, latest.last_review_result)
+            return ("[Cancel]: done", mode, latest.last_review_round, latest.last_review_result)
         except Exception as exc:
             async with self.session_manager.lock(chat_id=chat_id, user_id=user_id):
                 latest = await self.session_manager.load(chat_id=chat_id, user_id=user_id)
@@ -340,18 +341,21 @@ class BotOrchestrator:
             return None
 
     @staticmethod
-    def _help_text(*, working_directory: str) -> str:
+    def _help_text(*, mode: str, working_directory: str) -> str:
         return "\n".join(
             [
-                "available commands:",
+                "[Commands]:",
                 "/start",
-                "/mode single|plan|multi",
+                "/mode single|plan",
                 "/new",
                 "/status",
                 "/profile list|<name>",
                 "/cancel",
-                "and plain text are forwarded to Codex workflow",
-                f"\nsession_working_directory: {working_directory}",
+                "plain text → Codex",
+                "",
+                "[Current]:",
+                f"mode={mode}",
+                f"working_directory={working_directory}",
             ]
         )
 
@@ -371,28 +375,29 @@ class BotOrchestrator:
             return str(value)
 
         lines = [
-            f"mode: {session.mode}",
+            "[Status]:",
+            f"mode={session.mode}",
             (
-                f"profile: {session.profile_name}, "
+                f"profile={session.profile_name}, "
                 f"model={session.profile_model or '-'}, "
                 f"working_directory={session.profile_working_directory or '-'}"
             ),
             (
-                f"last_run: {session.last_run_status} "
+                f"last_run={session.last_run_status} "
                 f"({session.last_run_latency_ms}ms)"
                 if session.last_run_latency_ms is not None
-                else f"last_run: {session.last_run_status}"
+                else f"last_run={session.last_run_status}"
             ),
         ]
 
         if session.mode == "plan":
             result = session.last_review_result or "-"
-            lines.append(f"plan_review: rounds={session.last_review_round}/3, result={result}")
+            lines.append(f"plan_review=rounds={session.last_review_round}/3, result={result}")
         elif session.mode == "single":
-            lines.append("single_run: direct")
+            lines.append("single_run=direct")
 
         if not mcp_status:
-            lines.append("codex_mcp: unknown")
+            lines.append("codex_mcp=unknown")
         else:
             running = mcp_status.get("running")
             ready = mcp_status.get("ready")
@@ -400,12 +405,14 @@ class BotOrchestrator:
             uptime = mcp_status.get("uptime_sec")
             uptime_display = "-" if uptime is None else f"{uptime}s"
             lines.append(
-                "codex_mcp: "
-                f"running={_to_display_bool(running)}, "
-                f"ready={_to_display_bool(ready)}, pid={pid}, uptime={uptime_display}"
+                f"codex_mcp=running={_to_display_bool(running)}, "
+                f"ready={_to_display_bool(ready)}, "
+                f"pid={pid or '-'}, "
+                f"uptime={uptime_display}"
             )
 
-        lines.append(f"last_error: {session.last_error or '-'}")
+        lines.append(f"last_error={session.last_error or '-'}")
+
         return "\n".join(lines)
 
     def _ensure_session_profile(self, session: BotSession) -> bool:
@@ -459,7 +466,7 @@ class BotOrchestrator:
 
     def _format_profile_list(self, session: BotSession) -> str:
         default_profile = self.profile_registry.default_profile()
-        lines = ["profiles:"]
+        lines = ["[Profiles]:"]
         for name in sorted(self.profile_registry.profiles.keys(), key=str.lower):
             profile = self.profile_registry.profiles[name]
             active_prefix = "*" if profile.name == session.profile_name else "-"

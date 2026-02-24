@@ -199,13 +199,7 @@ class TelegramPollingRunnerProgressTests(unittest.TestCase):
 
         asyncio.run(_scenario())
         self.assertEqual(orchestrator.handle_calls, 1)
-        self.assertEqual(
-            api.messages,
-            [
-                ("100", "[mode] this request will run in plan mode."),
-                ("100", "done"),
-            ],
-        )
+        self.assertEqual(api.messages, [("100", "done")])
 
     def test_run_polling_creates_conf_before_token_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

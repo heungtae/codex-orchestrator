@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from integrations.codex_executor import CodexExecutor
-from workflows.multi_agent_workflow import MultiAgentWorkflow
 from workflows.plan_agent_workflow import (
     LlmDeveloperAgent,
     LlmPlannerAgent,
@@ -31,6 +31,7 @@ class AgentFactory:
         self,
         *,
         single_workflow: Workflow,
+        on_mode_selected: Callable[[str, str], None] | None = None,
     ) -> PlanWorkflow:
         selector = LlmSelectorAgent(executor=self.executor)
         planner = LlmPlannerAgent(executor=self.executor)
@@ -43,7 +44,5 @@ class AgentFactory:
             reviewer=reviewer,
             single_workflow=single_workflow,
             max_review_rounds=self.max_review_rounds,
+            on_mode_selected=on_mode_selected,
         )
-
-    def create_multi_workflow(self) -> MultiAgentWorkflow:
-        return MultiAgentWorkflow(executor=self.executor)

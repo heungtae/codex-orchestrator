@@ -1,12 +1,12 @@
 # codex-orchestrator
 
-Telegram Bot에서 Codex 워크플로우(single/plan/multi)를 실행하기 위한 Python 오케스트레이터입니다.
+Telegram Bot에서 Codex 워크플로우(single/plan)를 실행하기 위한 Python 오케스트레이터입니다.
 
 ## 주요 기능
 - Telegram long polling 기반 요청 처리
 - `/mode`, `/profile`, `/cancel` 등 운영 명령 라우팅
-- single 모드 단일 developer agent 즉시 실행
-- plan 모드 `planner -> developer -> reviewer` 조합 실행(요청별 단계 선검토, 단순 요청은 mode 전환 없이 single agent 경로로 위임, 리뷰 최대 3회)
+- single 모드: 단일 developer agent 즉시 실행
+- plan 모드: `selector -> planner -> developer -> reviewer` 조합 실행 (selector가 요청을 분석하여 single/plan 자동 라우팅, 리뷰 최대 3회)
 - 사용자 허용 목록(`telegram.allowed_users`) 기반 접근 제어
 - Codex MCP warmup 및 상태 확인
 - 세션/트레이스 파일 저장
@@ -14,7 +14,7 @@ Telegram Bot에서 Codex 워크플로우(single/plan/multi)를 실행하기 위�
 
 ## 프로젝트 구조
 - `src/core`: 라우팅, 오케스트레이션, 세션, 프로파일, 트레이스
-- `src/workflows`: single/plan/multi 워크플로우
+- `src/workflows`: single/plan 워크플로우
 - `src/integrations`: Codex executor, MCP 상태 연동
 - `src/bot`: Telegram update 파싱, 메시지 분할
 - `scripts/telegram_polling_runner.py`: 운영 진입점
@@ -120,7 +120,7 @@ PYTHONPATH=src python3 -m unittest -q tests.test_telegram_polling_runner
 
 ## Telegram 명령
 - `/start`: 명령 안내
-- `/mode single|plan|multi`: 모드 전환
+- `/mode single|plan`: 모드 전환 (기본: plan)
 - `/new`: 현재 세션 초기화
 - `/status`: 실행 상태 확인
 - `/cancel`: 실행 중 요청 취소

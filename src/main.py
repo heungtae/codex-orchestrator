@@ -282,7 +282,6 @@ def build_orchestrator() -> BotOrchestrator:
         trace_logger=TraceLogger(),
         single_workflow=single_workflow,
         plan_workflow=plan_workflow,
-        multi_workflow=agent_factory.create_multi_workflow(),
         codex_mcp=codex_mcp,
         working_directory=getattr(executor, "cwd", None) or default_profile.working_directory,
         profile_registry=profile_registry,

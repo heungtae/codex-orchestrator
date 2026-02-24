@@ -30,7 +30,7 @@ class SessionManager:
             session_id=self.session_id(chat_id=chat_id, user_id=user_id),
             chat_id=str(chat_id),
             user_id=str(user_id),
-            mode="single",
+            mode="plan",
             history=[],
             run_lock=False,
         )

@@ -110,6 +110,10 @@ _ACTIVE_NOTIFICATION_HANDLER: contextvars.ContextVar[
 ] = contextvars.ContextVar("codex_notification_handler", default=None)
 _ACTIVE_NOTIFICATION_HANDLER_FALLBACK: Any | None = None
 
+_MODE_SELECT_CALLBACK: contextvars.ContextVar[
+    Any | None
+] = contextvars.ContextVar("mode_select_callback", default=None)
+
 
 def _stdout_print(
     *values: object,
@@ -621,28 +625,6 @@ def _format_intermediate_notification_text(notification: _AgentTextNotification)
     return notification.text
 
 
-async def _resolve_workflow_mode_notice(
-    *,
-    orchestrator: Any,
-    chat_id: str,
-    user_id: str,
-    text: str,
-) -> str | None:
-    preview = getattr(orchestrator, "preview_workflow_mode", None)
-    if not callable(preview):
-        return None
-
-    try:
-        mode = await preview(chat_id, user_id, text)
-    except Exception as exc:
-        _stdout_print(f"[warn] failed to preview workflow mode: {exc}")
-        return None
-
-    if mode in ("single", "plan"):
-        return f"[mode] this request will run in {mode} mode."
-    return None
-
-
 async def _run_with_progress_notifications(
     *,
     orchestrator: Any,
@@ -681,16 +663,47 @@ async def _run_with_progress_notifications(
 
         asyncio.run_coroutine_threadsafe(_send(), loop)
 
+    def _on_mode_selected(mode: str, reason: str) -> None:
+        del reason
+
+        async def _send() -> None:
+            try:
+                await _run_blocking(
+                    _safe_send, api, chat_id, f"[auto mode select] this request will run in {mode} mode."
+                )
+            except Exception as exc:
+                _stdout_print(f"[warn] failed to forward mode select notification: {exc}")
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run_coroutine_threadsafe(_send(), loop)
+            return
+
+        if running_loop is loop:
+            task = loop.create_task(_send())
+            pending_sends.add(task)
+            task.add_done_callback(pending_sends.discard)
+            return
+
+        asyncio.run_coroutine_threadsafe(_send(), loop)
+
+    mode_select_token = _MODE_SELECT_CALLBACK.set(_on_mode_selected)
+
     global _ACTIVE_NOTIFICATION_HANDLER_FALLBACK
-    callback_token = _ACTIVE_NOTIFICATION_HANDLER.set(_forward_intermediate)
+    notification_token = _ACTIVE_NOTIFICATION_HANDLER.set(_forward_intermediate)
     _ACTIVE_NOTIFICATION_HANDLER_FALLBACK = _forward_intermediate
 
     try:
+        plan_workflow = getattr(orchestrator, "plan_workflow", None)
+        if plan_workflow is not None:
+            plan_workflow.on_mode_selected = _on_mode_selected
         return await orchestrator.handle_message(chat_id, user_id, text)
     finally:
+        _MODE_SELECT_CALLBACK.reset(mode_select_token)
         if pending_sends:
             await asyncio.gather(*list(pending_sends), return_exceptions=True)
-        _ACTIVE_NOTIFICATION_HANDLER.reset(callback_token)
+        _ACTIVE_NOTIFICATION_HANDLER.reset(notification_token)
         if _ACTIVE_NOTIFICATION_HANDLER_FALLBACK is _forward_intermediate:
             _ACTIVE_NOTIFICATION_HANDLER_FALLBACK = None
 
@@ -707,15 +720,6 @@ async def _process_inbound_request(
     progress_interval_sec: float,
     progress_message_template: str,
 ) -> None:
-    mode_notice = await _resolve_workflow_mode_notice(
-        orchestrator=orchestrator,
-        chat_id=chat_id,
-        user_id=user_id,
-        text=text,
-    )
-    if mode_notice:
-        await _run_blocking(_safe_send, api, chat_id, mode_notice)
-
     try:
         output = await _run_with_progress_notifications(
             orchestrator=orchestrator,

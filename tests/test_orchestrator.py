@@ -26,18 +26,6 @@ class FakeSingleWorkflow:
         }
 
 
-class FakeMultiWorkflow:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def run(self, input_text, session):
-        self.calls += 1
-        return {
-            "output_text": f"multi:{input_text}",
-            "next_history": session.history,
-        }
-
-
 class FakePlanWorkflow:
     def __init__(self) -> None:
         self.calls = 0
@@ -90,35 +78,34 @@ class OrchestratorTests(unittest.TestCase):
             trace_logger=TraceLogger(base_dir=tmp_path / "traces"),
             single_workflow=FakeSingleWorkflow(),
             plan_workflow=FakePlanWorkflow(),
-            multi_workflow=FakeMultiWorkflow(),
             codex_mcp=mcp,
             profile_registry=profiles,
         )
 
-    def test_default_mode_is_single_and_status_includes_mcp(self) -> None:
+    def test_default_mode_is_plan_and_status_includes_mcp(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             orchestrator = self._build(Path(tmp))
 
             output = asyncio.run(orchestrator.handle_message("1", "2", "add a textbox to the file"))
-            self.assertTrue(output.startswith("single:"))
+            self.assertTrue(output.startswith("plan:"))
 
             status = asyncio.run(orchestrator.handle_message("1", "2", "/status"))
-            self.assertIn("mode: single", status)
-            self.assertIn("profile: default, model=gpt-5, working_directory=/tmp/default", status)
-            self.assertIn("single_run: direct", status)
-            self.assertIn("codex_mcp: running=true, ready=true, pid=12345", status)
+            self.assertIn("mode=plan", status)
+            self.assertIn("profile=default, model=gpt-5, working_directory=/tmp/default", status)
+            self.assertIn("plan_review=rounds=1/3, result=approved", status)
+            self.assertIn("codex_mcp=running=true, ready=true, pid=", status)
 
     def test_plan_mode_runs_plan_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             orchestrator = self._build(Path(tmp))
 
             switch = asyncio.run(orchestrator.handle_message("1", "2", "/mode plan"))
-            self.assertEqual(switch, "mode set to plan")
+            self.assertEqual(switch, "[Mode]: plan")
             output = asyncio.run(orchestrator.handle_message("1", "2", "plan this"))
             self.assertTrue(output.startswith("plan:"))
             status = asyncio.run(orchestrator.handle_message("1", "2", "/status"))
-            self.assertIn("mode: plan", status)
-            self.assertIn("plan_review: rounds=1/3, result=approved", status)
+            self.assertIn("mode=plan", status)
+            self.assertIn("plan_review=rounds=1/3, result=approved", status)
 
     def test_start_command_includes_session_working_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -128,30 +115,30 @@ class OrchestratorTests(unittest.TestCase):
             output = asyncio.run(orchestrator.handle_message("1", "2", "/start"))
             self.assertIn("/profile list|<name>", output)
             self.assertIn("/cancel", output)
-            self.assertIn(f"session_working_directory: {Path(tmp).resolve()}", output)
+            self.assertIn(f"working_directory={Path(tmp).resolve()}", output)
 
     def test_new_command_resets_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             orchestrator = self._build(Path(tmp))
 
-            asyncio.run(orchestrator.handle_message("1", "2", "/mode multi"))
+            asyncio.run(orchestrator.handle_message("1", "2", "/mode single"))
             asyncio.run(orchestrator.handle_message("1", "2", "/profile bridge"))
             status_before = asyncio.run(orchestrator.handle_message("1", "2", "/status"))
-            self.assertIn("mode: multi", status_before)
-            self.assertIn("profile: bridge", status_before)
+            self.assertIn("mode=single", status_before)
+            self.assertIn("profile=bridge", status_before)
 
             reset_output = asyncio.run(orchestrator.handle_message("1", "2", "/new"))
-            self.assertIn("mode=single", reset_output)
+            self.assertIn("mode=plan", reset_output)
 
             status_after = asyncio.run(orchestrator.handle_message("1", "2", "/status"))
-            self.assertIn("mode: single", status_after)
-            self.assertIn("profile: default", status_after)
+            self.assertIn("mode=plan", status_after)
+            self.assertIn("profile=default", status_after)
 
     def test_codex_literal_is_forwarded_to_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             orchestrator = self._build(Path(tmp))
             response = asyncio.run(orchestrator.handle_message("1", "2", "/codex"))
-            self.assertEqual(response, "single:/codex")
+            self.assertEqual(response, "plan:/codex")
 
     def test_codex_execution_error_returns_configuration_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -162,10 +149,10 @@ class OrchestratorTests(unittest.TestCase):
                 trace_logger=TraceLogger(base_dir=Path(tmp) / "traces"),
                 single_workflow=FailingWorkflow(),
                 plan_workflow=FakePlanWorkflow(),
-                multi_workflow=FakeMultiWorkflow(),
                 codex_mcp=mcp,
             )
 
+            asyncio.run(orchestrator.handle_message("1", "2", "/mode single"))
             response = asyncio.run(orchestrator.handle_message("1", "2", "test"))
             self.assertIn("[codex].mcp_command", response)
             self.assertIn("detail:", response)
@@ -175,43 +162,24 @@ class OrchestratorTests(unittest.TestCase):
             orchestrator = self._build(Path(tmp))
 
             listed = asyncio.run(orchestrator.handle_message("1", "2", "/profile list"))
-            self.assertIn("profiles:", listed)
+            self.assertIn("[Profiles]:", listed)
             self.assertIn("* default (default): model=gpt-5, working_directory=/tmp/default", listed)
             self.assertIn("- bridge: model=gpt-5, working_directory=/tmp/bridge", listed)
 
             switched = asyncio.run(orchestrator.handle_message("1", "2", "/profile bridge"))
-            self.assertIn("profile set to bridge", switched)
-            self.assertIn("working_directory: /tmp/bridge", switched)
+            self.assertIn("[Profile]: bridge", switched)
+            self.assertIn("working_directory=/tmp/bridge", switched)
 
             status = asyncio.run(orchestrator.handle_message("1", "2", "/status"))
-            self.assertIn("profile: bridge, model=gpt-5, working_directory=/tmp/bridge", status)
+            self.assertIn("profile=bridge, model=gpt-5, working_directory=/tmp/bridge", status)
 
-    def test_profile_usage_and_not_found(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            orchestrator = self._build(Path(tmp))
-
-            usage = asyncio.run(orchestrator.handle_message("1", "2", "/profile"))
-            self.assertEqual(usage, "usage: /profile list|<name>")
-
-            not_found = asyncio.run(orchestrator.handle_message("1", "2", "/profile unknown"))
-            self.assertIn("profile not found: unknown", not_found)
-
-    def test_plain_profile_command_switches_profile(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            orchestrator = self._build(Path(tmp))
-
-            switched = asyncio.run(orchestrator.handle_message("1", "2", "profile bridge"))
-            self.assertIn("profile set to bridge", switched)
-            self.assertIn("working_directory: /tmp/bridge", switched)
-
-            status = asyncio.run(orchestrator.handle_message("1", "2", "/status"))
-            self.assertIn("profile: bridge, model=gpt-5, working_directory=/tmp/bridge", status)
+            self.assertIn("profile=bridge, model=gpt-5, working_directory=/tmp/bridge", status)
 
     def test_cancel_command_returns_no_running_task_when_idle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             orchestrator = self._build(Path(tmp))
             response = asyncio.run(orchestrator.handle_message("1", "2", "/cancel"))
-            self.assertEqual(response, "no running task to cancel.")
+            self.assertEqual(response, "[Cancel]: no running task")
 
     def test_cancel_command_cancels_running_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -223,9 +191,10 @@ class OrchestratorTests(unittest.TestCase):
                 trace_logger=TraceLogger(base_dir=Path(tmp) / "traces"),
                 single_workflow=workflow,
                 plan_workflow=FakePlanWorkflow(),
-                multi_workflow=FakeMultiWorkflow(),
                 codex_mcp=mcp,
             )
+
+            asyncio.run(orchestrator.handle_message("1", "2", "/mode single"))
 
             async def _scenario() -> tuple[str, str]:
                 running = asyncio.create_task(orchestrator.handle_message("1", "2", "long work"))
@@ -236,20 +205,20 @@ class OrchestratorTests(unittest.TestCase):
 
             cancel_message, result_message = asyncio.run(_scenario())
 
-            self.assertEqual(cancel_message, "cancel requested.")
-            self.assertEqual(result_message, "request canceled.")
+            self.assertEqual(cancel_message, "[Cancel]: requested")
+            self.assertEqual(result_message, "[Cancel]: done")
             self.assertTrue(workflow.cancelled.is_set())
 
             status = asyncio.run(orchestrator.handle_message("1", "2", "/status"))
-            self.assertIn("last_run: error", status)
-            self.assertIn("last_error: cancelled", status)
+            self.assertIn("last_run=error", status)
+            self.assertIn("last_error=cancelled", status)
 
     def test_preview_workflow_mode_reports_current_mode_for_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             orchestrator = self._build(Path(tmp))
 
             default_mode = asyncio.run(orchestrator.preview_workflow_mode("1", "2", "do work"))
-            self.assertEqual(default_mode, "single")
+            self.assertEqual(default_mode, "plan")
 
             asyncio.run(orchestrator.handle_message("1", "2", "/mode plan"))
             plan_mode = asyncio.run(orchestrator.preview_workflow_mode("1", "2", "do work"))

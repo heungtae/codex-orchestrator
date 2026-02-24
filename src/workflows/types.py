@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 from core.models import BotSession, WorkflowResult
 
@@ -10,6 +10,7 @@ from core.models import BotSession, WorkflowResult
 class SelectorDecision:
     mode: Literal["single", "plan"]
     reason: str
+    callback: Callable[[str, str], None] | None = None
 
 
 @dataclass

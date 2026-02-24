@@ -16,18 +16,18 @@ class SessionAndTraceTests(unittest.TestCase):
             manager = SessionManager(base_dir=tmp_path / "sessions")
 
             session = asyncio.run(manager.load(chat_id="100", user_id="200"))
-            self.assertEqual(session.mode, "single")
+            self.assertEqual(session.mode, "plan")
 
-            session.mode = "multi"
+            session.mode = "plan"
             session.history = [{"role": "user", "content": "hello"}]
             asyncio.run(manager.save(session))
 
             loaded = asyncio.run(manager.load(chat_id="100", user_id="200"))
-            self.assertEqual(loaded.mode, "multi")
+            self.assertEqual(loaded.mode, "plan")
             self.assertEqual(loaded.history, [{"role": "user", "content": "hello"}])
 
             reset = asyncio.run(manager.reset(chat_id="100", user_id="200"))
-            self.assertEqual(reset.mode, "single")
+            self.assertEqual(reset.mode, "plan")
             self.assertEqual(reset.history, [])
 
             session_file = tmp_path / "sessions" / "100-200.json"

@@ -24,15 +24,13 @@ src/integrations/codex_executor.py
 src/integrations/codex_mcp.py
 src/workflows/__init__.py
 src/workflows/agent_factory.py
-src/workflows/multi_agent_workflow.py
-src/workflows/plan_workflow.py
+src/workflows/plan_agent_workflow.py
 src/workflows/single_agent_workflow.py
 src/workflows/types.py
 tests/test_codex_executor.py
 tests/test_codex_mcp.py
 tests/test_command_router.py
 tests/test_main.py
-tests/test_multi_agent_workflow.py
 tests/test_orchestrator.py
 tests/test_plan_workflow.py
 tests/test_profiles.py

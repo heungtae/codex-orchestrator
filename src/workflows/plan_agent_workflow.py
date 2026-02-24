@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from core.models import BotSession, WorkflowResult
 from integrations.codex_executor import CodexExecutionError, CodexExecutor, codex_agent_name_scope
@@ -18,6 +19,10 @@ from workflows.types import (
     SelectorDecision,
     Workflow,
 )
+
+_MODE_SELECT_CALLBACK: contextvars.ContextVar[
+    Callable[[str, str], None] | None
+] = contextvars.ContextVar("mode_select_callback", default=None)
 
 _MAX_REVIEW_FEEDBACK_CHARS = 1200
 _MAX_PLANNER_OUTPUT_CHARS = 1500
@@ -336,11 +341,19 @@ class PlanWorkflow:
     max_review_rounds: int = 3
     review_only_with_artifacts: bool = True
     workspace_dir: Path | None = None
+    on_mode_selected: Callable[[str, str], None] | None = None
 
     async def run(self, input_text: str, session: BotSession) -> WorkflowResult:
         session.history = self._sanitize_history(session.history)
 
         selector_decision = await self.selector.select_mode(user_input=input_text, session=session)
+
+        if selector_decision.mode == "plan":
+            callback = _MODE_SELECT_CALLBACK.get()
+            if callback is None:
+                callback = self.on_mode_selected
+            if callback is not None:
+                callback(selector_decision.mode, selector_decision.reason)
 
         stage_transitions: list[dict[str, Any]] = [
             {"from": "start", "to": "selector", "round": 0, "status": "completed"},
@@ -510,6 +523,8 @@ class PlanWorkflow:
         if last_decision.result == "approved" and review_result != "max_rounds_reached":
             review_result = "approved"
 
+        selector_info = f"[Selector] mode={selector_decision.mode}, reason={selector_decision.reason}"
+
         base_output = candidate_output.strip()
         if not base_output:
             base_output = clipped_plan
@@ -519,6 +534,8 @@ class PlanWorkflow:
             rounds=rounds,
             review_result=review_result,
         )
+
+        final_output = f"{selector_info}\n\n{final_output}"
 
         next_history = [
             *session.history,

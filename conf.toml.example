@@ -38,62 +38,33 @@ working_directory = "~/develop/bridge-project"
 
 # Global agent overrides (applies to all profiles unless overridden).
 # If both system_prompt and system_prompt_file are set, system_prompt_file takes precedence.
+
 # single mode: direct developer execution (no planner/reviewer stage)
 # [agents.single.developer]
 # model = "gpt-5-codex"
 # system_prompt = "You are Single Developer Agent..."
 # system_prompt_file = "./prompts/developer.txt"
-#
-# plan mode: planner -> developer -> reviewer composition
+
+# plan mode: selector -> planner -> developer -> reviewer composition
+# [agents.plan.selector]
+# model = "gpt-5"
+# system_prompt = "You are Plan Selector Agent..."
+# system_prompt_file = "./prompts/plan-selector.txt"
+
 # [agents.plan.planner]
 # model = "gpt-5"
 # system_prompt = "You are Plan Planner Agent..."
 # system_prompt_file = "./prompts/plan-planner.txt"
-#
+
 # [agents.plan.developer]
 # model = "gpt-5-codex"
 # system_prompt = "You are Plan Developer Agent..."
 # system_prompt_file = "./prompts/plan-developer.txt"
-#
+
 # [agents.plan.reviewer]
 # model = "gpt-5"
 # system_prompt = "You are Plan Reviewer Agent..."
 # system_prompt_file = "./prompts/plan-reviewer.txt"
-#
+
 # Compatibility:
 # plan mode falls back to agents.single.planner/developer/reviewer when agents.plan.* is missing.
-#
-# Multi role overrides.
-# If both system_prompt and system_prompt_file are set, system_prompt_file takes precedence.
-# Shared override for all multi roles.
-# [agents.multi]
-# model = "gpt-5"
-# system_prompt = "You are Multi Agent..."
-# system_prompt_file = "./prompts/multi.txt"
-#
-# Per-role overrides (optional).
-# Can be combined with [agents.multi]; per-role keys take precedence.
-# [agents.multi.designer]
-# model = "gpt-5"
-# system_prompt = "You are Multi Designer Agent..."
-# system_prompt_file = "./prompts/multi-designer.txt"
-#
-# [agents.multi.frontend.developer]
-# model = "gpt-5"
-# system_prompt = "You are Multi Frontend Developer Agent..."
-# system_prompt_file = "./prompts/multi-frontend-developer.txt"
-#
-# [agents.multi.backend.developer]
-# model = "gpt-5"
-# system_prompt = "You are Multi Backend Developer Agent..."
-# system_prompt_file = "./prompts/multi-backend-developer.txt"
-#
-# [agents.multi.tester]
-# model = "gpt-5"
-# system_prompt = "You are Multi Tester Agent..."
-# system_prompt_file = "./prompts/multi-tester.txt"
-#
-# [agents.multi.manager]
-# model = "gpt-5"
-# system_prompt = "You are Multi Manager Agent..."
-# system_prompt_file = "./prompts/multi-manager.txt"

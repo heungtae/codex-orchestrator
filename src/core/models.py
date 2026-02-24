@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal, TypedDict
 
-BotMode = Literal["single", "plan", "multi"]
+BotMode = Literal["single", "plan"]
 InputKind = Literal["bot_command", "codex_slash", "text"]
 BotCommandName = Literal["start", "mode", "new", "status", "profile", "cancel"]
 ReviewResult = Literal["approved", "needs_changes", "max_rounds_reached"]
@@ -28,7 +28,7 @@ class BotSession:
     session_id: str
     chat_id: str
     user_id: str
-    mode: BotMode = "single"
+    mode: BotMode = "plan"
     history: list[dict[str, Any]] = field(default_factory=list)
     run_lock: bool = False
     last_error: str | None = None
@@ -69,9 +69,9 @@ class BotSession:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "BotSession":
-        mode = payload.get("mode", "single")
-        if mode not in ("single", "plan", "multi"):
-            mode = "single"
+        mode = payload.get("mode", "plan")
+        if mode not in ("single", "plan"):
+            mode = "plan"
 
         last_run_status = payload.get("last_run_status", "idle")
         if last_run_status not in ("idle", "ok", "error"):
