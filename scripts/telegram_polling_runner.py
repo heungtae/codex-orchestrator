@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import tomli as tomllib
+
 from bot.telegram_adapter import parse_update, split_telegram_text
 from integrations.codex_executor import (
     CodexMcpExecutor,
@@ -25,6 +27,8 @@ from integrations.codex_executor import (
     get_active_codex_agent_name,
 )
 from main import build_orchestrator
+
+_VERSION = "0.2.1"
 
 _BLOCKING_POOL = ThreadPoolExecutor(max_workers=8)
 _DEFAULT_CONF_PATH = Path.home() / ".codex-orchestrator" / "conf.toml"
@@ -1035,7 +1039,32 @@ async def _run_polling() -> None:
         await _close_codex_mcp(orchestrator)
 
 
+def _parse_args() -> tuple[str | None, str | None, str | None]:
+    conf_path = None
+    for i, arg in enumerate(sys.argv[1:]):
+        if arg == "--version":
+            print(f"codex-orchestrator {_VERSION}")
+            sys.exit(0)
+        if arg == "--help" or arg == "-h":
+            print(f"""codex-orchestrator {_VERSION}
+
+Usage: codex-orchestrator [OPTIONS]
+
+Options:
+  --conf PATH    Config file path (default: ~/.codex-orchestrator/conf.toml)
+  --version      Show version
+  --help, -h     Show this help
+
+For more info: https://github.com/heungtae/codex-orchestrator""")
+            sys.exit(0)
+        if arg == "--conf" and i + 2 < len(sys.argv):
+            conf_path = sys.argv[i + 2]
+    return conf_path, None, None
+
+
 def main() -> None:
+    _parse_args()
+    os.environ["CODEX_ORCHESTRATOR_VERSION"] = _VERSION
     _configure_logging()
     try:
         asyncio.run(_run_polling())

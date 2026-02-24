@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -124,6 +125,7 @@ class BotOrchestrator:
                 current_mode = session.mode
             return (
                 self._help_text(
+                    version=os.environ.get("CODEX_ORCHESTRATOR_VERSION", "unknown"),
                     mode=current_mode,
                     working_directory=self._resolve_working_directory(self.working_directory)
                 ),
@@ -341,9 +343,11 @@ class BotOrchestrator:
             return None
 
     @staticmethod
-    def _help_text(*, mode: str, working_directory: str) -> str:
+    def _help_text(*, version: str, mode: str, working_directory: str) -> str:
         return "\n".join(
             [
+                f"codex-orchestrator {version}",
+                "",
                 "[Commands]:",
                 "/start",
                 "/mode single|plan",
