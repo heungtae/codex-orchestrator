@@ -27,6 +27,10 @@ from integrations.codex_executor import (
     get_active_codex_agent_name,
 )
 from main import build_orchestrator
+from workflows.plan_agent_workflow import (
+    _AGENT_TRANSFER_CALLBACK,
+    _MODE_SELECT_CALLBACK,
+)
 
 _VERSION = "0.2.1"
 
@@ -692,7 +696,33 @@ async def _run_with_progress_notifications(
 
         asyncio.run_coroutine_threadsafe(_send(), loop)
 
+    def _on_agent_transfer(from_agent: str, to_agent: str, round: int) -> None:
+        round_str = f" (round {round})" if round > 0 else ""
+        message = f"[agent transfer] {from_agent} → {to_agent}{round_str}"
+        _stdout_print(message)
+
+        async def _send() -> None:
+            try:
+                await _run_blocking(_safe_send, api, chat_id, message)
+            except Exception as exc:
+                _stdout_print(f"[warn] failed to forward agent transfer notification: {exc}")
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run_coroutine_threadsafe(_send(), loop)
+            return
+
+        if running_loop is loop:
+            task = loop.create_task(_send())
+            pending_sends.add(task)
+            task.add_done_callback(pending_sends.discard)
+            return
+
+        asyncio.run_coroutine_threadsafe(_send(), loop)
+
     mode_select_token = _MODE_SELECT_CALLBACK.set(_on_mode_selected)
+    agent_transfer_token = _AGENT_TRANSFER_CALLBACK.set(_on_agent_transfer)
 
     global _ACTIVE_NOTIFICATION_HANDLER_FALLBACK
     notification_token = _ACTIVE_NOTIFICATION_HANDLER.set(_forward_intermediate)
@@ -702,9 +732,11 @@ async def _run_with_progress_notifications(
         plan_workflow = getattr(orchestrator, "plan_workflow", None)
         if plan_workflow is not None:
             plan_workflow.on_mode_selected = _on_mode_selected
+            plan_workflow.on_agent_transfer = _on_agent_transfer
         return await orchestrator.handle_message(chat_id, user_id, text)
     finally:
         _MODE_SELECT_CALLBACK.reset(mode_select_token)
+        _AGENT_TRANSFER_CALLBACK.reset(agent_transfer_token)
         if pending_sends:
             await asyncio.gather(*list(pending_sends), return_exceptions=True)
         _ACTIVE_NOTIFICATION_HANDLER.reset(notification_token)

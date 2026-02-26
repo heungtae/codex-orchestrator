@@ -18,7 +18,7 @@ from workflows.types import Workflow
 @dataclass
 class AgentFactory:
     executor: CodexExecutor
-    max_review_rounds: int = 3
+    max_review_rounds: int = 1
 
     def create_single_workflow(self) -> SingleAgentWorkflow:
         developer = LlmSingleDeveloperAgent(executor=self.executor)

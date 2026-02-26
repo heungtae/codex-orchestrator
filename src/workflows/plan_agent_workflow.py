@@ -24,6 +24,10 @@ _MODE_SELECT_CALLBACK: contextvars.ContextVar[
     Callable[[str, str], None] | None
 ] = contextvars.ContextVar("mode_select_callback", default=None)
 
+_AGENT_TRANSFER_CALLBACK: contextvars.ContextVar[
+    Callable[[str, str, int], None] | None
+] = contextvars.ContextVar("agent_transfer_callback", default=None)
+
 _MAX_REVIEW_FEEDBACK_CHARS = 1200
 _MAX_PLANNER_OUTPUT_CHARS = 1500
 _MAX_HISTORY_ITEMS = 20
@@ -338,10 +342,18 @@ class PlanWorkflow:
     developer: DeveloperAgent
     reviewer: ReviewerAgent
     single_workflow: Workflow
-    max_review_rounds: int = 3
+    max_review_rounds: int = 1
     review_only_with_artifacts: bool = True
     workspace_dir: Path | None = None
     on_mode_selected: Callable[[str, str], None] | None = None
+    on_agent_transfer: Callable[[str, str, int], None] | None = None
+
+    def _notify_agent_transfer(self, from_agent: str, to_agent: str, round: int) -> None:
+        callback = _AGENT_TRANSFER_CALLBACK.get()
+        if callback is None:
+            callback = self.on_agent_transfer
+        if callback is not None:
+            callback(from_agent, to_agent, round)
 
     async def run(self, input_text: str, session: BotSession) -> WorkflowResult:
         session.history = self._sanitize_history(session.history)
@@ -360,6 +372,7 @@ class PlanWorkflow:
         ]
 
         if selector_decision.mode == "single":
+            self._notify_agent_transfer("selector", "single_workflow", 0)
             stage_transitions.append(
                 {
                     "from": "selector",
@@ -380,6 +393,8 @@ class PlanWorkflow:
                 "delegated_to": "single_workflow",
             }
             return result
+
+        self._notify_agent_transfer("selector", "planner", 0)
 
         stage_transitions.append(
             {
@@ -407,9 +422,13 @@ class PlanWorkflow:
         review_round = 0
         previous_feedback: str | None = None
         previous_candidate_output: str | None = None
+        last_round_feedback: str | None = None
 
         for round_index in range(1, self.max_review_rounds + 1):
+            if round_index > 1 and last_round_feedback is not None:
+                review_feedback = last_round_feedback
             from_stage = "planner" if round_index == 1 else "reviewer"
+            self._notify_agent_transfer(from_stage, "developer", round_index)
             stage_transitions.append(
                 {
                     "from": from_stage,
@@ -430,6 +449,7 @@ class PlanWorkflow:
                 review_feedback=review_feedback,
             )
 
+            self._notify_agent_transfer("developer", "reviewer", round_index)
             stage_transitions.append(
                 {
                     "from": "developer",
@@ -442,7 +462,6 @@ class PlanWorkflow:
             if self.review_only_with_artifacts:
                 after_snapshot = self._snapshot_workspace(session.profile_working_directory)
                 artifacts = self._detect_artifacts(before_snapshot, after_snapshot)
-
             decision = await self.reviewer.review(
                 user_input=execution_input,
                 candidate_output=candidate_output,
@@ -464,61 +483,68 @@ class PlanWorkflow:
             stage_transitions[-1]["status"] = decision.result
 
             if decision.result == "approved":
-                stage_transitions.append(
-                    {
-                        "from": "reviewer",
-                        "to": "completed",
-                        "round": round_index,
-                        "status": "approved",
-                    }
-                )
-                review_result = "approved"
-                review_round = round_index
-                break
+                if round_index == self.max_review_rounds:
+                    self._notify_agent_transfer("reviewer", "completed", round_index)
+                    stage_transitions.append(
+                        {
+                            "from": "reviewer",
+                            "to": "completed",
+                            "round": round_index,
+                            "status": "approved",
+                        }
+                    )
+                    review_result = "approved"
+                    review_round = round_index
+                    break
+                else:
+                    stage_transitions.append(
+                        {
+                            "from": "reviewer",
+                            "to": "completed",
+                            "round": round_index,
+                            "status": "approved",
+                        }
+                    )
+                    review_result = "approved"
+                    review_round = round_index
+                    break
 
-            current_candidate = candidate_output.strip()
-            if previous_candidate_output and current_candidate == previous_candidate_output:
-                stage_transitions.append(
-                    {
-                        "from": "reviewer",
-                        "to": "completed",
-                        "round": round_index,
-                        "status": "max_rounds_reached",
-                        "reason": "same_candidate_output",
-                    }
-                )
-                review_result = "max_rounds_reached"
-                review_round = round_index
-                break
-
-            if previous_feedback and clipped_feedback and clipped_feedback == previous_feedback:
-                stage_transitions.append(
-                    {
-                        "from": "reviewer",
-                        "to": "completed",
-                        "round": round_index,
-                        "status": "max_rounds_reached",
-                        "reason": "same_feedback",
-                    }
-                )
-                review_result = "max_rounds_reached"
-                review_round = round_index
-                break
-
-            review_feedback = clipped_feedback
-            previous_feedback = clipped_feedback
-            previous_candidate_output = current_candidate
-        else:
+            self._notify_agent_transfer("reviewer", "developer", round_index)
+            before_snapshot = (
+                self._snapshot_workspace(session.profile_working_directory)
+                if self.review_only_with_artifacts
+                else {}
+            )
+            candidate_output = await self.developer.develop(
+                user_input=execution_input,
+                session=session,
+                round_index=round_index,
+                review_feedback=clipped_feedback,
+            )
             stage_transitions.append(
                 {
-                    "from": "reviewer",
+                    "from": "developer",
                     "to": "completed",
-                    "round": self.max_review_rounds,
-                    "status": "max_rounds_reached",
+                    "round": round_index,
+                    "status": "needs_changes",
                 }
             )
-            review_result = "max_rounds_reached"
-            review_round = self.max_review_rounds
+            review_result = "needs_changes"
+            review_round = round_index
+            review_feedback = clipped_feedback
+            previous_feedback = clipped_feedback
+            previous_candidate_output = candidate_output.strip()
+
+        if review_result != "approved" and review_result != "completed":
+            self._notify_agent_transfer("developer", "completed", self.max_review_rounds)
+            stage_transitions.append(
+                {
+                    "from": "developer",
+                    "to": "completed",
+                    "round": self.max_review_rounds,
+                    "status": review_result,
+                }
+            )
 
         if last_decision.result == "approved" and review_result != "max_rounds_reached":
             review_result = "approved"

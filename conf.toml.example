@@ -23,6 +23,7 @@ approval_policy = "never"
 sandbox = "danger-full-access"
 mcp_direct_status = true
 mcp_auto_detect_process = false
+max_review_rounds = 1
 
 [profile]
 # Default execution profile name.

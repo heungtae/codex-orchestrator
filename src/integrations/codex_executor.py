@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -136,8 +137,6 @@ class CodexMcpExecutor:
             await self.close()
         except Exception:
             self._session = None
-            self._session_cm = None
-            self._stdio_cm = None
             self._started = False
         finally:
             if current_task is not None:
@@ -145,15 +144,12 @@ class CodexMcpExecutor:
                     current_task.cancel()
 
     async def _reset_after_transport_error(self, error_message: str) -> None:
-        # If the transport/session has broken, force a fresh connection on next run.
         try:
             await self.close()
         except Exception:
             pass
         finally:
             self._session = None
-            self._session_cm = None
-            self._stdio_cm = None
             self._started = False
             self._set_status(stopped=True, error=error_message)
 
@@ -195,6 +191,7 @@ class CodexMcpExecutor:
                 except Exception as exc:
                     stdio_close_error = exc
             self._stdio_cm = None
+
             self._started = False
             self._set_status(stopped=True)
 
@@ -224,8 +221,10 @@ class CodexMcpExecutor:
                 args=list(self.mcp_args),
             )
 
+            stdio_cm = None
+            session_cm = None
             try:
-                stdio_cm = stdio_client(params)
+                stdio_cm = stdio_client(params, errlog=sys.stderr)
                 read_stream, write_stream = await stdio_cm.__aenter__()
 
                 session_cm = ClientSession(read_stream, write_stream)
@@ -237,12 +236,22 @@ class CodexMcpExecutor:
                 if "codex" not in tool_names:
                     raise CodexExecutionError("mcp server does not expose required tool: codex")
             except Exception as exc:
+                if session_cm is not None:
+                    try:
+                        await session_cm.__aexit__(None, None, None)
+                    except Exception:
+                        pass
+                if stdio_cm is not None:
+                    try:
+                        await stdio_cm.__aexit__(None, None, None)
+                    except Exception:
+                        pass
                 self._set_status(error=f"failed to start codex mcp server: {exc}")
                 raise CodexExecutionError(f"failed to start codex mcp server: {exc}") from exc
 
-            self._stdio_cm = stdio_cm
-            self._session_cm = session_cm
             self._session = session
+            self._session_cm = session_cm
+            self._stdio_cm = stdio_cm
             self._started = True
             self._set_status(running=True, ready=True)
 

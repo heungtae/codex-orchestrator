@@ -42,6 +42,7 @@ class _CodexRuntimeConfig:
     mcp_direct_status: bool = True
     mcp_status_cmd: str | None = None
     mcp_auto_detect_process: bool = False
+    max_review_rounds: int = 1
 
 
 def _load_toml_payload(conf_path: Path) -> dict[str, Any]:
@@ -218,6 +219,12 @@ def _load_codex_runtime_config(conf_path: Path) -> _CodexRuntimeConfig:
         key_name="codex.mcp_auto_detect_process",
         default=False,
     )
+    max_review_rounds = _required_positive_int(
+        value=raw_codex.get("max_review_rounds"),
+        conf_path=conf_path,
+        key_name="codex.max_review_rounds",
+        default=1,
+    )
 
     if mcp_direct_status:
         mcp_status_cmd = None
@@ -235,6 +242,7 @@ def _load_codex_runtime_config(conf_path: Path) -> _CodexRuntimeConfig:
         mcp_direct_status=mcp_direct_status,
         mcp_status_cmd=mcp_status_cmd,
         mcp_auto_detect_process=mcp_auto_detect_process,
+        max_review_rounds=max_review_rounds,
     )
 
 
@@ -273,7 +281,7 @@ def build_orchestrator() -> BotOrchestrator:
             cwd=default_profile.working_directory,
         )
 
-    agent_factory = AgentFactory(executor=executor, max_review_rounds=3)
+    agent_factory = AgentFactory(executor=executor, max_review_rounds=codex_config.max_review_rounds)
     single_workflow = agent_factory.create_single_workflow()
     plan_workflow = agent_factory.create_plan_workflow(single_workflow=single_workflow)
     return BotOrchestrator(
