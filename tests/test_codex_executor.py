@@ -1,5 +1,7 @@
 import asyncio
+import io
 import unittest
+from contextlib import redirect_stdout
 
 from integrations.codex_executor import CodexExecutionError, CodexMcpExecutor
 
@@ -32,6 +34,16 @@ class _FailingSession:
 class _CancelledSession:
     async def call_tool(self, tool_name, payload):
         raise asyncio.CancelledError()
+
+
+class _TextResponseSession:
+    async def call_tool(self, tool_name, payload):
+        return {"content": [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}]}
+
+
+class _StructuredResponseSession:
+    async def call_tool(self, tool_name, payload):
+        return {"structuredContent": {"content": "structured message"}}
 
 
 class _NoopAsyncContext:
@@ -134,6 +146,32 @@ class CodexMcpExecutorTests(unittest.TestCase):
         self.assertIsNone(executor._session)
         self.assertIsNone(executor._session_cm)
         self.assertIsNone(executor._stdio_cm)
+
+    def test_run_prints_all_text_response_messages(self) -> None:
+        executor = CodexMcpExecutor()
+        executor._started = True
+        executor._session = _TextResponseSession()
+
+        captured = io.StringIO()
+        with redirect_stdout(captured):
+            output = asyncio.run(executor.run(prompt="hello"))
+
+        self.assertEqual(output, "first\nsecond")
+        logs = captured.getvalue()
+        self.assertIn("[codex mcp-response] first", logs)
+        self.assertIn("[codex mcp-response] second", logs)
+
+    def test_run_prints_structured_response_message(self) -> None:
+        executor = CodexMcpExecutor()
+        executor._started = True
+        executor._session = _StructuredResponseSession()
+
+        captured = io.StringIO()
+        with redirect_stdout(captured):
+            output = asyncio.run(executor.run(prompt="hello"))
+
+        self.assertEqual(output, "structured message")
+        self.assertIn("[codex mcp-response] structured message", captured.getvalue())
 
 
 if __name__ == "__main__":

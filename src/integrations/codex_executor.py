@@ -112,6 +112,7 @@ class CodexMcpExecutor:
             await self._reset_after_transport_error(str(exc))
             raise CodexExecutionError(f"failed to call mcp tool 'codex': {exc}") from exc
 
+        self._print_mcp_response_messages(result)
         output_text, is_error = self._extract_call_result(result)
         if is_error:
             raise CodexExecutionError(output_text or "codex mcp tool returned error")
@@ -313,6 +314,41 @@ class CodexMcpExecutor:
             return json.dumps(payload, ensure_ascii=False), is_error
 
         return "", is_error
+
+    @staticmethod
+    def _print_mcp_response_messages(result: Any) -> None:
+        payload: dict[str, Any]
+        if hasattr(result, "model_dump"):
+            payload = result.model_dump()
+        else:
+            payload = dict(result) if isinstance(result, dict) else {}
+
+        content_items = payload.get("content")
+        if isinstance(content_items, list) and content_items:
+            for item in content_items:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str) and text.strip():
+                        print(f"[codex mcp-response] {text.strip()}", flush=True)
+                        continue
+                print(
+                    f"[codex mcp-response] {json.dumps(item, ensure_ascii=False)}",
+                    flush=True,
+                )
+            return
+
+        structured = payload.get("structuredContent") or payload.get("structured_content")
+        if isinstance(structured, dict):
+            structured_text = structured.get("content")
+            if isinstance(structured_text, str) and structured_text.strip():
+                print(f"[codex mcp-response] {structured_text.strip()}", flush=True)
+                return
+
+        if payload:
+            print(
+                f"[codex mcp-response] {json.dumps(payload, ensure_ascii=False)}",
+                flush=True,
+            )
 
     def _set_status(
         self,
