@@ -551,6 +551,44 @@ poll_timeout = "30"
             ],
         )
 
+    def test_codex_event_validation_filter_dispatches_without_validation_error_prefix(self) -> None:
+        filter_ = _CodexEventValidationFilter()
+        delivered: list[tuple[str, str, str]] = []
+
+        def _capture(notification: object) -> None:
+            delivered.append(
+                (
+                    getattr(notification, "message_id"),
+                    getattr(notification, "phase"),
+                    getattr(notification, "text"),
+                )
+            )
+
+        record = logging.LogRecord(
+            name="root",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg=(
+                "received notification: method='codex/event' "
+                "params={'msg': {'type': 'item_completed', 'item': {'type': 'AgentMessage', "
+                "'id': 'msg_live', 'content': [{'type': 'Text', 'text': 'live update'}], "
+                "'phase': 'commentary'}}} jsonrpc='2.0'"
+            ),
+            args=(),
+            exc_info=None,
+        )
+
+        token = _ACTIVE_NOTIFICATION_HANDLER.set(_capture)
+        try:
+            with patch("builtins.print"):
+                allowed = filter_.filter(record)
+        finally:
+            _ACTIVE_NOTIFICATION_HANDLER.reset(token)
+
+        self.assertFalse(allowed)
+        self.assertEqual(delivered, [("msg_live", "commentary", "live update")])
+
     def test_codex_event_validation_filter_ignores_other_event_types(self) -> None:
         filter_ = _CodexEventValidationFilter()
         record = logging.LogRecord(

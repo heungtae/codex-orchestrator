@@ -264,7 +264,7 @@ class _CodexEventValidationFilter(logging.Filter):
     @classmethod
     def _extract_agent_text_notification(cls, message: str) -> _AgentTextNotification | None:
         payload = cls._extract_notification_payload(message)
-        if "method='codex/event'" not in payload:
+        if "codex/event" not in payload:
             return None
 
         params_literal = cls._extract_params_literal(payload)
@@ -375,7 +375,7 @@ class _CodexEventValidationFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
-        if "Failed to validate notification" in message and "codex/event" in message:
+        if "codex/event" in message:
             notification = self._extract_agent_text_notification(message)
             if notification is not None:
                 _stdout_print(self._format_agent_text_notification(notification), flush=True)
