@@ -7,11 +7,19 @@ import sys
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 
 class CodexExecutionError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class AgentTextNotification:
+    message_id: str
+    phase: str
+    text: str
+    agent_name: str | None = None
 
 
 _ACTIVE_CODEX_AGENT_NAME: ContextVar[str | None] = ContextVar(
@@ -64,6 +72,7 @@ class CodexMcpExecutor:
     sandbox: str = "danger-full-access"
     cwd: str | None = None
     close_timeout_seconds: float = 2.0
+    on_agent_message: Callable[[AgentTextNotification], None] | None = None
 
     _startup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _session: Any | None = field(default=None, init=False, repr=False)
@@ -228,7 +237,22 @@ class CodexMcpExecutor:
                 stdio_cm = stdio_client(params, errlog=sys.stderr)
                 read_stream, write_stream = await stdio_cm.__aenter__()
 
-                session_cm = ClientSession(read_stream, write_stream)
+                async def _message_handler(message: Any) -> None:
+                    notification = self._extract_notification_from_session_message(message)
+                    if notification is not None:
+                        self._emit_agent_notification(notification)
+
+                async def _logging_callback(params: Any) -> None:
+                    notification = self._extract_notification_from_logging_params(params)
+                    if notification is not None:
+                        self._emit_agent_notification(notification)
+
+                session_cm = ClientSession(
+                    read_stream,
+                    write_stream,
+                    message_handler=_message_handler,
+                    logging_callback=_logging_callback,
+                )
                 session = await session_cm.__aenter__()
                 await session.initialize()
 
@@ -349,6 +373,124 @@ class CodexMcpExecutor:
                 f"[codex mcp-response] {json.dumps(payload, ensure_ascii=False)}",
                 flush=True,
             )
+
+    def _emit_agent_notification(self, notification: AgentTextNotification) -> None:
+        agent_name = notification.agent_name or "-"
+        print(
+            "[codex-notification] "
+            f"id={notification.message_id} "
+            f"phase={notification.phase} "
+            f"agent={agent_name} "
+            f"text={notification.text}",
+            flush=True,
+        )
+
+        callback = self.on_agent_message
+        if callback is None:
+            return
+
+        try:
+            callback(notification)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _extract_notification_from_session_message(message: Any) -> AgentTextNotification | None:
+        notification: Any = message
+        if hasattr(message, "root"):
+            notification = message.root
+        if hasattr(notification, "model_dump"):
+            notification = notification.model_dump()
+        elif hasattr(notification, "__dict__"):
+            notification = dict(vars(notification))
+
+        if not isinstance(notification, dict):
+            return None
+
+        method = notification.get("method")
+        if method != "codex/event":
+            return None
+
+        params = notification.get("params")
+        if not isinstance(params, dict):
+            return None
+        return CodexMcpExecutor._extract_notification_from_event_params(params)
+
+    @staticmethod
+    def _extract_notification_from_logging_params(params: Any) -> AgentTextNotification | None:
+        payload = params.model_dump() if hasattr(params, "model_dump") else params
+        if not isinstance(payload, dict):
+            return None
+        return CodexMcpExecutor._extract_notification_from_event_params(payload)
+
+    @staticmethod
+    def _extract_notification_from_event_params(params: dict[str, Any]) -> AgentTextNotification | None:
+        msg = params.get("msg")
+        if not isinstance(msg, dict) or msg.get("type") != "item_completed":
+            return None
+
+        item = msg.get("item")
+        if not isinstance(item, dict) or item.get("type") != "AgentMessage":
+            return None
+
+        phase = item.get("phase")
+        if not isinstance(phase, str) or not phase:
+            return None
+
+        content = item.get("content")
+        if not isinstance(content, list):
+            return None
+
+        text_parts: list[str] = []
+        for content_item in content:
+            if not isinstance(content_item, dict):
+                continue
+            if content_item.get("type") != "Text":
+                continue
+            text = content_item.get("text")
+            if isinstance(text, str) and text.strip():
+                text_parts.append(text.strip())
+
+        if not text_parts:
+            return None
+
+        agent_name = CodexMcpExecutor._extract_agent_name(params=params, msg=msg, item=item)
+        message_id = item.get("id")
+        return AgentTextNotification(
+            message_id=message_id if isinstance(message_id, str) else "",
+            phase=phase,
+            text="\n".join(text_parts),
+            agent_name=agent_name,
+        )
+
+    @staticmethod
+    def _extract_agent_name(
+        *,
+        params: dict[str, Any],
+        msg: dict[str, Any],
+        item: dict[str, Any],
+    ) -> str | None:
+        scoped_agent_name = get_active_codex_agent_name()
+        if isinstance(scoped_agent_name, str):
+            normalized_scoped = scoped_agent_name.strip()
+            if normalized_scoped:
+                return normalized_scoped
+
+        keys = ("agent_name", "agent", "agentName", "role_name", "role")
+        containers: list[dict[str, Any]] = [item, msg, params]
+        for node in (item.get("metadata"), msg.get("metadata"), params.get("metadata")):
+            if isinstance(node, dict):
+                containers.append(node)
+
+        for container in containers:
+            for key in keys:
+                value = container.get(key)
+                if isinstance(value, str):
+                    normalized = value.strip()
+                    if normalized:
+                        return normalized
+
+        return None
 
     def _set_status(
         self,

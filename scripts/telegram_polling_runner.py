@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import ast
 import asyncio
 import builtins
 import contextvars
@@ -22,9 +21,9 @@ import tomli as tomllib
 
 from bot.telegram_adapter import parse_update, split_telegram_text
 from integrations.codex_executor import (
+    AgentTextNotification,
     CodexMcpExecutor,
     EchoCodexExecutor,
-    get_active_codex_agent_name,
 )
 from main import build_orchestrator
 from workflows.plan_agent_workflow import (
@@ -89,14 +88,6 @@ _UNAUTHORIZED_MESSAGE = "Unauthorized"
 
 
 @dataclass(frozen=True)
-class _AgentTextNotification:
-    message_id: str
-    phase: str
-    text: str
-    agent_name: str | None = None
-
-
-@dataclass(frozen=True)
 class _PollingConfig:
     poll_timeout: int = 30
     loop_sleep_sec: float = 1.0
@@ -112,11 +103,6 @@ class _RunnerConfig:
     allowed_users: set[str] | None
     polling: _PollingConfig
 
-
-_ACTIVE_NOTIFICATION_HANDLER: contextvars.ContextVar[
-    Any | None
-] = contextvars.ContextVar("codex_notification_handler", default=None)
-_ACTIVE_NOTIFICATION_HANDLER_FALLBACK: Any | None = None
 
 _MODE_SELECT_CALLBACK: contextvars.ContextVar[
     Any | None
@@ -203,189 +189,8 @@ class TelegramBotApi:
         )
 
 
-class _CodexEventValidationFilter(logging.Filter):
-    """Emit selected `codex/event` notifications and suppress warning noise."""
-
-    @staticmethod
-    def _extract_notification_payload(message: str) -> str:
-        marker = "Message was:"
-        if marker in message:
-            payload = message.split(marker, 1)[1].strip()
-            if payload:
-                return payload
-        return message
-
-    @staticmethod
-    def _extract_params_literal(payload: str) -> str | None:
-        marker = "params="
-        marker_index = payload.find(marker)
-        if marker_index < 0:
-            return None
-
-        raw = payload[marker_index + len(marker) :]
-        start = raw.find("{")
-        if start < 0:
-            return None
-
-        depth = 0
-        in_single = False
-        in_double = False
-        escaped = False
-        started = False
-
-        for index, char in enumerate(raw[start:], start=start):
-            if escaped:
-                escaped = False
-                continue
-            if char == "\\":
-                escaped = True
-                continue
-
-            if char == "'" and not in_double:
-                in_single = not in_single
-                continue
-            if char == '"' and not in_single:
-                in_double = not in_double
-                continue
-            if in_single or in_double:
-                continue
-
-            if char == "{":
-                depth += 1
-                started = True
-                continue
-            if char == "}":
-                depth -= 1
-                if started and depth == 0:
-                    return raw[start : index + 1]
-
-        return None
-
-    @classmethod
-    def _extract_agent_text_notification(cls, message: str) -> _AgentTextNotification | None:
-        payload = cls._extract_notification_payload(message)
-        if "codex/event" not in payload:
-            return None
-
-        params_literal = cls._extract_params_literal(payload)
-        if params_literal is None:
-            return None
-
-        try:
-            params = ast.literal_eval(params_literal)
-        except Exception:
-            return None
-        if not isinstance(params, dict):
-            return None
-
-        msg = params.get("msg")
-        if not isinstance(msg, dict):
-            return None
-        if msg.get("type") != "item_completed":
-            return None
-
-        item = msg.get("item")
-        if not isinstance(item, dict):
-            return None
-        if item.get("type") != "AgentMessage":
-            return None
-
-        phase = item.get("phase")
-        if not isinstance(phase, str) or not phase:
-            return None
-
-        content = item.get("content")
-        if not isinstance(content, list):
-            return None
-
-        text_parts: list[str] = []
-        for content_item in content:
-            if not isinstance(content_item, dict):
-                continue
-            if content_item.get("type") != "Text":
-                continue
-            text = content_item.get("text")
-            if isinstance(text, str) and text:
-                text_parts.append(text)
-
-        if not text_parts:
-            return None
-
-        agent_name = cls._extract_agent_name(params=params, msg=msg, item=item)
-        message_id = item.get("id")
-        return _AgentTextNotification(
-            message_id=message_id if isinstance(message_id, str) else "",
-            phase=phase,
-            text="\n".join(text_parts),
-            agent_name=agent_name,
-        )
-
-    @staticmethod
-    def _extract_agent_name(
-        *,
-        params: dict[str, Any],
-        msg: dict[str, Any],
-        item: dict[str, Any],
-    ) -> str | None:
-        scoped_agent_name = get_active_codex_agent_name()
-        if isinstance(scoped_agent_name, str):
-            normalized_scoped = scoped_agent_name.strip()
-            if normalized_scoped:
-                return normalized_scoped
-
-        keys = ("agent_name", "agent", "agentName", "role_name", "role")
-        containers: list[dict[str, Any]] = [item, msg, params]
-        for node in (item.get("metadata"), msg.get("metadata"), params.get("metadata")):
-            if isinstance(node, dict):
-                containers.append(node)
-
-        for container in containers:
-            for key in keys:
-                value = container.get(key)
-                if isinstance(value, str):
-                    normalized = value.strip()
-                    if normalized:
-                        return normalized
-
-        return None
-
-    @staticmethod
-    def _format_agent_text_notification(notification: _AgentTextNotification) -> str:
-        agent_name = notification.agent_name or "-"
-        return (
-            "[codex-notification] "
-            f"id={notification.message_id} "
-            f"phase={notification.phase} "
-            f"agent={agent_name} "
-            f"text={notification.text}"
-        )
-
-    @staticmethod
-    def _dispatch_intermediate_notification(notification: _AgentTextNotification) -> None:
-        callback = _ACTIVE_NOTIFICATION_HANDLER.get()
-        if callback is None:
-            callback = _ACTIVE_NOTIFICATION_HANDLER_FALLBACK
-        if callback is None:
-            return
-
-        try:
-            callback(notification)
-        except Exception as exc:
-            _stdout_print(f"[warn] failed to dispatch codex notification: {exc}")
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-        if "codex/event" in message:
-            notification = self._extract_agent_text_notification(message)
-            if notification is not None:
-                _stdout_print(self._format_agent_text_notification(notification), flush=True)
-                self._dispatch_intermediate_notification(notification)
-            return False
-        return True
-
-
 def _configure_logging() -> None:
-    logging.getLogger().addFilter(_CodexEventValidationFilter())
+    logging.getLogger().setLevel(logging.INFO)
 
 
 def _resolve_conf_path(raw_path: str | Path) -> Path:
@@ -627,7 +432,7 @@ def _format_inbound_stdout(*, chat_id: str, user_id: str, text: str) -> str:
     return f"[telegram-inbound] chat_id={chat_id} user_id={user_id} text={escaped_text}"
 
 
-def _format_intermediate_notification_text(notification: _AgentTextNotification) -> str:
+def _format_intermediate_notification_text(notification: AgentTextNotification) -> str:
     if notification.agent_name:
         return f"[{notification.agent_name}] {notification.text}"
     return notification.text
@@ -644,12 +449,20 @@ async def _run_with_progress_notifications(
     initial_delay_sec: float,
     interval_sec: float,
     message_template: str,
-) -> str:
+) -> tuple[str, bool]:
     del enabled, initial_delay_sec, interval_sec, message_template
     loop = asyncio.get_running_loop()
     pending_sends: set[asyncio.Task[None]] = set()
 
-    def _forward_intermediate(notification: _AgentTextNotification) -> None:
+    final_answer_sent = False
+
+    def _forward_intermediate(notification: AgentTextNotification) -> None:
+        nonlocal final_answer_sent
+        if notification.phase not in {"commentary", "final_answer"}:
+            return
+        if notification.phase == "final_answer":
+            final_answer_sent = True
+
         async def _send() -> None:
             try:
                 outbound_text = _format_intermediate_notification_text(notification)
@@ -724,24 +537,26 @@ async def _run_with_progress_notifications(
     mode_select_token = _MODE_SELECT_CALLBACK.set(_on_mode_selected)
     agent_transfer_token = _AGENT_TRANSFER_CALLBACK.set(_on_agent_transfer)
 
-    global _ACTIVE_NOTIFICATION_HANDLER_FALLBACK
-    notification_token = _ACTIVE_NOTIFICATION_HANDLER.set(_forward_intermediate)
-    _ACTIVE_NOTIFICATION_HANDLER_FALLBACK = _forward_intermediate
+    executor = _extract_executor(orchestrator)
+    previous_callback: Any | None = None
+    if isinstance(executor, CodexMcpExecutor):
+        previous_callback = executor.on_agent_message
+        executor.on_agent_message = _forward_intermediate
 
     try:
         plan_workflow = getattr(orchestrator, "plan_workflow", None)
         if plan_workflow is not None:
             plan_workflow.on_mode_selected = _on_mode_selected
             plan_workflow.on_agent_transfer = _on_agent_transfer
-        return await orchestrator.handle_message(chat_id, user_id, text)
+        output = await orchestrator.handle_message(chat_id, user_id, text)
+        return output, final_answer_sent
     finally:
         _MODE_SELECT_CALLBACK.reset(mode_select_token)
         _AGENT_TRANSFER_CALLBACK.reset(agent_transfer_token)
         if pending_sends:
             await asyncio.gather(*list(pending_sends), return_exceptions=True)
-        _ACTIVE_NOTIFICATION_HANDLER.reset(notification_token)
-        if _ACTIVE_NOTIFICATION_HANDLER_FALLBACK is _forward_intermediate:
-            _ACTIVE_NOTIFICATION_HANDLER_FALLBACK = None
+        if isinstance(executor, CodexMcpExecutor):
+            executor.on_agent_message = previous_callback
 
 
 async def _process_inbound_request(
@@ -757,7 +572,7 @@ async def _process_inbound_request(
     progress_message_template: str,
 ) -> None:
     try:
-        output = await _run_with_progress_notifications(
+        output, final_answer_sent = await _run_with_progress_notifications(
             orchestrator=orchestrator,
             api=api,
             chat_id=chat_id,
@@ -776,7 +591,8 @@ async def _process_inbound_request(
         except Exception as exc:
             _stdout_print(f"[warn] failed to close codex mcp session after request: {exc}")
 
-    await _run_blocking(_safe_send, api, chat_id, output)
+    if not final_answer_sent:
+        await _run_blocking(_safe_send, api, chat_id, output)
 
 
 async def _cancel_inflight_request(

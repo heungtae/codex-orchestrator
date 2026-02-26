@@ -1,15 +1,11 @@
 import asyncio
-import logging
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from integrations.codex_executor import codex_agent_name_scope
+from integrations.codex_executor import AgentTextNotification, CodexMcpExecutor
 from scripts.telegram_polling_runner import (
-    _ACTIVE_NOTIFICATION_HANDLER,
-    _AgentTextNotification,
-    _CodexEventValidationFilter,
     _cancel_inflight_request,
     _format_intermediate_notification_text,
     _format_inbound_stdout,
@@ -64,6 +60,22 @@ class _ModeAwareOrchestrator:
 
     async def handle_message(self, chat_id: str, user_id: str, text: str) -> str:
         self.handle_calls += 1
+        return self.output
+
+
+class _ExecutorWiredOrchestrator:
+    def __init__(self, notifications: list[AgentTextNotification], output: str = "done") -> None:
+        self._notifications = notifications
+        self.output = output
+        self.single_workflow = type("SingleWorkflow", (), {})()
+        self.single_workflow.developer = type("Dev", (), {})()
+        self.single_workflow.developer._executor = CodexMcpExecutor()
+
+    async def handle_message(self, chat_id: str, user_id: str, text: str) -> str:
+        callback = self.single_workflow.developer._executor.on_agent_message
+        if callback is not None:
+            for notification in self._notifications:
+                callback(notification)
         return self.output
 
 
@@ -315,7 +327,7 @@ poll_timeout = "30"
         orchestrator = _SlowOrchestrator(delay_sec=0.03, output="done")
         api = _FakeTelegramApi()
 
-        output = asyncio.run(
+        output, final_answer_sent = asyncio.run(
             _run_with_progress_notifications(
                 orchestrator=orchestrator,
                 api=api,
@@ -330,13 +342,14 @@ poll_timeout = "30"
         )
 
         self.assertEqual(output, "done")
+        self.assertFalse(final_answer_sent)
         self.assertEqual(api.messages, [])
 
     def test_slow_request_does_not_emit_synthetic_progress_message(self) -> None:
         orchestrator = _SlowOrchestrator(delay_sec=0.28, output="done")
         api = _FakeTelegramApi()
 
-        output = asyncio.run(
+        output, final_answer_sent = asyncio.run(
             _run_with_progress_notifications(
                 orchestrator=orchestrator,
                 api=api,
@@ -351,6 +364,7 @@ poll_timeout = "30"
         )
 
         self.assertEqual(output, "done")
+        self.assertFalse(final_answer_sent)
         self.assertEqual(api.messages, [])
 
     def test_next_offset_from_updates_returns_latest_plus_one(self) -> None:
@@ -370,7 +384,7 @@ poll_timeout = "30"
 
     def test_format_intermediate_notification_text_adds_agent_prefix(self) -> None:
         text = _format_intermediate_notification_text(
-            _AgentTextNotification(
+            AgentTextNotification(
                 message_id="msg_mid",
                 phase="commentary",
                 text="progress",
@@ -379,256 +393,91 @@ poll_timeout = "30"
         )
         self.assertEqual(text, "[single.developer] progress")
 
-    def test_codex_event_validation_filter_prints_agent_text_notification(self) -> None:
-        filter_ = _CodexEventValidationFilter()
-        record = logging.LogRecord(
-            name="root",
-            level=logging.WARNING,
-            pathname=__file__,
-            lineno=1,
-            msg=(
-                "Failed to validate notification: validation error. "
-                "Message was: method='codex/event' "
-                "params={'msg': {'type': 'item_completed', 'item': {'type': 'AgentMessage', "
-                "'id': 'msg_1', 'content': [{'type': 'Text', 'text': 'hello world'}], "
-                "'phase': 'commentary', 'agent_name': 'single.planner'}}} jsonrpc='2.0'"
-            ),
-            args=(),
-            exc_info=None,
-        )
-
-        with patch("builtins.print") as mocked_print:
-            allowed = filter_.filter(record)
-
-        self.assertFalse(allowed)
-        self.assertEqual(mocked_print.call_count, 1)
-        printed = mocked_print.call_args.args[0]
-        self.assertIn("[codex-notification]", printed)
-        self.assertIn("id=msg_1", printed)
-        self.assertIn("phase=commentary", printed)
-        self.assertIn("agent=single.planner", printed)
-        self.assertIn("text=hello world", printed)
-        self.assertEqual(mocked_print.call_args.kwargs, {"flush": True})
-
-    def test_codex_event_validation_filter_uses_agent_context_fallback(self) -> None:
-        filter_ = _CodexEventValidationFilter()
-        record = logging.LogRecord(
-            name="root",
-            level=logging.WARNING,
-            pathname=__file__,
-            lineno=1,
-            msg=(
-                "Failed to validate notification: validation error. "
-                "Message was: method='codex/event' "
-                "params={'msg': {'type': 'item_completed', 'item': {'type': 'AgentMessage', "
-                "'id': 'msg_1', 'content': [{'type': 'Text', 'text': 'hello world'}], "
-                "'phase': 'commentary'}}} jsonrpc='2.0'"
-            ),
-            args=(),
-            exc_info=None,
-        )
-
-        with codex_agent_name_scope("single.reviewer"):
-            with patch("builtins.print") as mocked_print:
-                allowed = filter_.filter(record)
-
-        self.assertFalse(allowed)
-        printed = mocked_print.call_args.args[0]
-        self.assertIn("agent=single.reviewer", printed)
-
-    def test_codex_event_validation_filter_prefers_agent_context_over_payload_agent(self) -> None:
-        filter_ = _CodexEventValidationFilter()
-        record = logging.LogRecord(
-            name="root",
-            level=logging.WARNING,
-            pathname=__file__,
-            lineno=1,
-            msg=(
-                "Failed to validate notification: validation error. "
-                "Message was: method='codex/event' "
-                "params={'msg': {'type': 'item_completed', 'item': {'type': 'AgentMessage', "
-                "'id': 'msg_1', 'content': [{'type': 'Text', 'text': 'hello world'}], "
-                "'phase': 'commentary', 'agent_name': 'plan.planner'}}} jsonrpc='2.0'"
-            ),
-            args=(),
-            exc_info=None,
-        )
-
-        with codex_agent_name_scope("plan.developer"):
-            with patch("builtins.print") as mocked_print:
-                allowed = filter_.filter(record)
-
-        self.assertFalse(allowed)
-        printed = mocked_print.call_args.args[0]
-        self.assertIn("agent=plan.developer", printed)
-
-    def test_codex_event_validation_filter_prints_final_answer_to_stdout(self) -> None:
-        filter_ = _CodexEventValidationFilter()
-        record = logging.LogRecord(
-            name="root",
-            level=logging.WARNING,
-            pathname=__file__,
-            lineno=1,
-            msg=(
-                "Failed to validate notification: validation error. "
-                "Message was: method='codex/event' "
-                "params={'msg': {'type': 'item_completed', 'item': {'type': 'AgentMessage', "
-                "'id': 'msg_final', 'content': [{'type': 'Text', 'text': 'done'}], "
-                "'phase': 'final_answer'}}} jsonrpc='2.0'"
-            ),
-            args=(),
-            exc_info=None,
-        )
-
-        with patch("builtins.print") as mocked_print:
-            allowed = filter_.filter(record)
-
-        self.assertFalse(allowed)
-        self.assertEqual(mocked_print.call_count, 1)
-        printed = mocked_print.call_args.args[0]
-        self.assertIn("id=msg_final", printed)
-        self.assertIn("phase=final_answer", printed)
-        self.assertIn("text=done", printed)
-        self.assertEqual(mocked_print.call_args.kwargs, {"flush": True})
-
-    def test_codex_event_validation_filter_dispatches_commentary_and_final(self) -> None:
-        filter_ = _CodexEventValidationFilter()
-        delivered: list[tuple[str, str, str]] = []
-
-        def _capture(notification: object) -> None:
-            delivered.append(
-                (
-                    getattr(notification, "message_id"),
-                    getattr(notification, "phase"),
-                    getattr(notification, "text"),
-                )
-            )
-
-        commentary = logging.LogRecord(
-            name="root",
-            level=logging.WARNING,
-            pathname=__file__,
-            lineno=1,
-            msg=(
-                "Failed to validate notification: validation error. "
-                "Message was: method='codex/event' "
-                "params={'msg': {'type': 'item_completed', 'item': {'type': 'AgentMessage', "
-                "'id': 'msg_mid', 'content': [{'type': 'Text', 'text': 'progress'}], "
-                "'phase': 'commentary'}}} jsonrpc='2.0'"
-            ),
-            args=(),
-            exc_info=None,
-        )
-        final_answer = logging.LogRecord(
-            name="root",
-            level=logging.WARNING,
-            pathname=__file__,
-            lineno=1,
-            msg=(
-                "Failed to validate notification: validation error. "
-                "Message was: method='codex/event' "
-                "params={'msg': {'type': 'item_completed', 'item': {'type': 'AgentMessage', "
-                "'id': 'msg_final', 'content': [{'type': 'Text', 'text': 'final'}], "
-                "'phase': 'final_answer'}}} jsonrpc='2.0'"
-            ),
-            args=(),
-            exc_info=None,
-        )
-
-        token = _ACTIVE_NOTIFICATION_HANDLER.set(_capture)
-        try:
-            with patch("builtins.print"):
-                self.assertFalse(filter_.filter(commentary))
-                self.assertFalse(filter_.filter(final_answer))
-        finally:
-            _ACTIVE_NOTIFICATION_HANDLER.reset(token)
-
-        self.assertEqual(
-            delivered,
-            [
-                ("msg_mid", "commentary", "progress"),
-                ("msg_final", "final_answer", "final"),
+    def test_run_with_progress_notifications_forwards_commentary_and_final(self) -> None:
+        orchestrator = _ExecutorWiredOrchestrator(
+            notifications=[
+                AgentTextNotification(
+                    message_id="msg_1",
+                    phase="commentary",
+                    text="working",
+                    agent_name="plan.developer",
+                ),
+                AgentTextNotification(
+                    message_id="msg_2",
+                    phase="final_answer",
+                    text="done",
+                    agent_name="plan.developer",
+                ),
             ],
+            output="done",
         )
+        api = _FakeTelegramApi()
 
-    def test_codex_event_validation_filter_dispatches_without_validation_error_prefix(self) -> None:
-        filter_ = _CodexEventValidationFilter()
-        delivered: list[tuple[str, str, str]] = []
+        async def _fake_run_blocking(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
 
-        def _capture(notification: object) -> None:
-            delivered.append(
-                (
-                    getattr(notification, "message_id"),
-                    getattr(notification, "phase"),
-                    getattr(notification, "text"),
+        with patch("scripts.telegram_polling_runner._run_blocking", side_effect=_fake_run_blocking):
+            output, final_answer_sent = asyncio.run(
+                _run_with_progress_notifications(
+                    orchestrator=orchestrator,
+                    api=api,
+                    chat_id="100",
+                    user_id="200",
+                    text="hello",
+                    enabled=True,
+                    initial_delay_sec=0.1,
+                    interval_sec=0.1,
+                    message_template="working {elapsed_sec}s",
                 )
             )
+        
 
-        record = logging.LogRecord(
-            name="root",
-            level=logging.INFO,
-            pathname=__file__,
-            lineno=1,
-            msg=(
-                "received notification: method='codex/event' "
-                "params={'msg': {'type': 'item_completed', 'item': {'type': 'AgentMessage', "
-                "'id': 'msg_live', 'content': [{'type': 'Text', 'text': 'live update'}], "
-                "'phase': 'commentary'}}} jsonrpc='2.0'"
-            ),
-            args=(),
-            exc_info=None,
+        self.assertEqual(output, "done")
+        self.assertTrue(final_answer_sent)
+        self.assertEqual(
+            api.messages,
+            [("100", "[plan.developer] working"), ("100", "[plan.developer] done")],
         )
 
-        token = _ACTIVE_NOTIFICATION_HANDLER.set(_capture)
-        try:
-            with patch("builtins.print"):
-                allowed = filter_.filter(record)
-        finally:
-            _ACTIVE_NOTIFICATION_HANDLER.reset(token)
-
-        self.assertFalse(allowed)
-        self.assertEqual(delivered, [("msg_live", "commentary", "live update")])
-
-    def test_codex_event_validation_filter_ignores_other_event_types(self) -> None:
-        filter_ = _CodexEventValidationFilter()
-        record = logging.LogRecord(
-            name="root",
-            level=logging.WARNING,
-            pathname=__file__,
-            lineno=1,
-            msg=(
-                "Failed to validate notification: validation error. "
-                "Message was: method='codex/event' "
-                "params={'msg': {'type': 'item_started', 'item': {'type': 'AgentMessage', "
-                "'id': 'msg_1', 'content': [], 'phase': 'commentary'}}} jsonrpc='2.0'"
-            ),
-            args=(),
-            exc_info=None,
+    def test_process_inbound_request_skips_output_when_final_answer_was_forwarded(self) -> None:
+        orchestrator = _ExecutorWiredOrchestrator(
+            notifications=[
+                AgentTextNotification(
+                    message_id="msg_final",
+                    phase="final_answer",
+                    text="final from event",
+                    agent_name="plan.developer",
+                )
+            ],
+            output="final from output",
         )
+        api = _FakeTelegramApi()
 
-        with patch("builtins.print") as mocked_print:
-            allowed = filter_.filter(record)
+        async def _fake_run_blocking(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
 
-        self.assertFalse(allowed)
-        mocked_print.assert_not_called()
+        async def _scenario() -> None:
+            with (
+                patch("scripts.telegram_polling_runner._close_codex_mcp") as mocked_close,
+                patch("scripts.telegram_polling_runner._run_blocking", side_effect=_fake_run_blocking),
+            ):
+                await _process_inbound_request(
+                    orchestrator=orchestrator,
+                    api=api,
+                    chat_id="100",
+                    user_id="200",
+                    text="hello",
+                    progress_notify=True,
+                    progress_initial_delay_sec=0.1,
+                    progress_interval_sec=0.1,
+                    progress_message_template="working {elapsed_sec}s",
+                )
+                mocked_close.assert_called_once_with(orchestrator)
 
-    def test_codex_event_validation_filter_allows_other_logs(self) -> None:
-        filter_ = _CodexEventValidationFilter()
-        record = logging.LogRecord(
-            name="root",
-            level=logging.WARNING,
-            pathname=__file__,
-            lineno=1,
-            msg="some other warning",
-            args=(),
-            exc_info=None,
-        )
+        from scripts.telegram_polling_runner import _process_inbound_request
 
-        with patch("builtins.print") as mocked_print:
-            allowed = filter_.filter(record)
-
-        self.assertTrue(allowed)
-        mocked_print.assert_not_called()
+        asyncio.run(_scenario())
+        self.assertEqual(api.messages, [("100", "[plan.developer] final from event")])
 
 
 if __name__ == "__main__":

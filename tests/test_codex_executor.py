@@ -3,7 +3,7 @@ import io
 import unittest
 from contextlib import redirect_stdout
 
-from integrations.codex_executor import CodexExecutionError, CodexMcpExecutor
+from integrations.codex_executor import AgentTextNotification, CodexExecutionError, CodexMcpExecutor
 
 
 class _Tracker:
@@ -172,6 +172,66 @@ class CodexMcpExecutorTests(unittest.TestCase):
 
         self.assertEqual(output, "structured message")
         self.assertIn("[codex mcp-response] structured message", captured.getvalue())
+
+    def test_extract_notification_from_event_params(self) -> None:
+        params = {
+            "msg": {
+                "type": "item_completed",
+                "item": {
+                    "type": "AgentMessage",
+                    "id": "msg_1",
+                    "phase": "commentary",
+                    "content": [{"type": "Text", "text": "step 1"}],
+                    "agent_name": "plan.developer",
+                },
+            }
+        }
+
+        notification = CodexMcpExecutor._extract_notification_from_event_params(params)
+        self.assertEqual(
+            notification,
+            AgentTextNotification(
+                message_id="msg_1",
+                phase="commentary",
+                text="step 1",
+                agent_name="plan.developer",
+            ),
+        )
+
+    def test_extract_notification_from_session_message(self) -> None:
+        payload = {
+            "method": "codex/event",
+            "params": {
+                "msg": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "AgentMessage",
+                        "id": "msg_2",
+                        "phase": "final_answer",
+                        "content": [{"type": "Text", "text": "done"}],
+                    },
+                }
+            },
+        }
+
+        notification = CodexMcpExecutor._extract_notification_from_session_message(payload)
+        self.assertIsNotNone(notification)
+        self.assertEqual(notification.message_id, "msg_2")
+        self.assertEqual(notification.phase, "final_answer")
+        self.assertEqual(notification.text, "done")
+
+    def test_emit_agent_notification_calls_callback(self) -> None:
+        captured: list[AgentTextNotification] = []
+        executor = CodexMcpExecutor(on_agent_message=captured.append)
+        notification = AgentTextNotification(
+            message_id="msg_3",
+            phase="commentary",
+            text="working",
+            agent_name="single.developer",
+        )
+
+        executor._emit_agent_notification(notification)
+        self.assertEqual(captured, [notification])
 
 
 if __name__ == "__main__":
