@@ -220,6 +220,48 @@ class CodexMcpExecutorTests(unittest.TestCase):
         self.assertEqual(notification.phase, "final_answer")
         self.assertEqual(notification.text, "done")
 
+    def test_extract_notification_from_agent_message_event(self) -> None:
+        params = {
+            "id": "3",
+            "msg": {
+                "type": "agent_message",
+                "message": "working on it",
+                "phase": "commentary",
+                "agent_name": "single.developer",
+            },
+        }
+
+        notification = CodexMcpExecutor._extract_notification_from_event_params(params)
+        self.assertEqual(
+            notification,
+            AgentTextNotification(
+                message_id="3",
+                phase="commentary",
+                text="working on it",
+                agent_name="single.developer",
+            ),
+        )
+
+    def test_extract_notification_from_agent_message_delta_event(self) -> None:
+        params = {
+            "id": "4",
+            "msg": {
+                "type": "agent_message_delta",
+                "delta": ".",
+            },
+        }
+
+        notification = CodexMcpExecutor._extract_notification_from_event_params(params)
+        self.assertEqual(
+            notification,
+            AgentTextNotification(
+                message_id="4",
+                phase="commentary",
+                text=".",
+                agent_name=None,
+            ),
+        )
+
     def test_emit_agent_notification_calls_callback(self) -> None:
         captured: list[AgentTextNotification] = []
         executor = CodexMcpExecutor(on_agent_message=captured.append)
@@ -232,6 +274,17 @@ class CodexMcpExecutorTests(unittest.TestCase):
 
         executor._emit_agent_notification(notification)
         self.assertEqual(captured, [notification])
+
+    def test_log_codex_event_message_prints_params(self) -> None:
+        executor = CodexMcpExecutor(verbose_stdout=True)
+        payload = {
+            "method": "codex/event",
+            "params": {"id": "9", "msg": {"type": "agent_message", "message": "hi"}},
+        }
+        captured = io.StringIO()
+        with redirect_stdout(captured):
+            executor._log_codex_event_message(payload)
+        self.assertIn("[codex-event] method=codex/event params=", captured.getvalue())
 
 
 if __name__ == "__main__":

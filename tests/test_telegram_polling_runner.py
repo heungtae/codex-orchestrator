@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from integrations.codex_executor import AgentTextNotification, CodexMcpExecutor
 from scripts.telegram_polling_runner import (
+    _parse_args,
     _cancel_inflight_request,
     _format_intermediate_notification_text,
     _format_inbound_stdout,
@@ -156,6 +157,12 @@ class TelegramPollingRunnerProgressTests(unittest.TestCase):
             "[2026-02-22 09:10:11] [info] hello",
             flush=True,
         )
+
+    def test_parse_args_supports_verbose_and_conf(self) -> None:
+        with patch("sys.argv", ["telegram_polling_runner.py", "--verbose", "--conf", "/tmp/a.toml"]):
+            conf_path, verbose = _parse_args()
+        self.assertEqual(conf_path, "/tmp/a.toml")
+        self.assertTrue(verbose)
 
     def test_process_inbound_request_closes_mcp_session(self) -> None:
         orchestrator = _TrackingOrchestrator()

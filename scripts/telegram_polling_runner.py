@@ -118,8 +118,12 @@ def _stdout_print(
     if target is sys.stdout:
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         if values:
-            first, *rest = values
-            values = (f"[{timestamp}] {first}", *rest)
+            normalized_values: list[object] = list(values)
+            first_value = str(normalized_values[0])
+            normalized_values[0] = "\n".join(
+                f"[{timestamp}] {line}" for line in first_value.splitlines() or [""]
+            )
+            values = tuple(normalized_values)
         else:
             values = (f"[{timestamp}]",)
 
@@ -705,7 +709,7 @@ async def _close_codex_mcp(orchestrator: Any) -> None:
         _stdout_print(f"[warn] failed to close codex mcp session: {exc}")
 
 
-async def _run_polling() -> None:
+async def _run_polling(*, verbose: bool = False) -> None:
     conf_path = os.getenv("CODEX_CONF_PATH", str(_DEFAULT_CONF_PATH)).strip() or str(_DEFAULT_CONF_PATH)
     try:
         conf_file, runner_conf = _load_runner_config_from_conf(conf_path)
@@ -746,6 +750,11 @@ async def _run_polling() -> None:
             _stdout_print(f"[warn] failed to delete webhook on startup: {exc}")
 
     orchestrator = build_orchestrator()
+    if verbose:
+        executor = _extract_executor(orchestrator)
+        if isinstance(executor, CodexMcpExecutor):
+            executor.verbose_stdout = True
+            _stdout_print("[info] verbose mode enabled: codex events will be printed to stdout")
     active_request_task: asyncio.Task[None] | None = None
     try:
         next_offset: int | None = None
@@ -887,19 +896,21 @@ async def _run_polling() -> None:
         await _close_codex_mcp(orchestrator)
 
 
-def _parse_args() -> tuple[str | None, str | None, str | None]:
+def _parse_args() -> tuple[str | None, bool]:
     conf_path = None
+    verbose = False
     for i, arg in enumerate(sys.argv[1:]):
         if arg == "--version":
-            print(f"codex-orchestrator {_VERSION}")
+            _stdout_print(f"[info] codex-orchestrator {_VERSION}")
             sys.exit(0)
         if arg == "--help" or arg == "-h":
-            print(f"""codex-orchestrator {_VERSION}
+            _stdout_print(f"""[info] codex-orchestrator {_VERSION}
 
 Usage: codex-orchestrator [OPTIONS]
 
 Options:
   --conf PATH    Config file path (default: ~/.codex-orchestrator/conf.toml)
+  --verbose      Print all codex/event messages to stdout
   --version      Show version
   --help, -h     Show this help
 
@@ -907,15 +918,19 @@ For more info: https://github.com/heungtae/codex-orchestrator""")
             sys.exit(0)
         if arg == "--conf" and i + 2 < len(sys.argv):
             conf_path = sys.argv[i + 2]
-    return conf_path, None, None
+        if arg == "--verbose":
+            verbose = True
+    return conf_path, verbose
 
 
 def main() -> None:
-    _parse_args()
+    conf_path, verbose = _parse_args()
+    if conf_path:
+        os.environ["CODEX_CONF_PATH"] = conf_path
     os.environ["CODEX_ORCHESTRATOR_VERSION"] = _VERSION
     _configure_logging()
     try:
-        asyncio.run(_run_polling())
+        asyncio.run(_run_polling(verbose=verbose))
     except KeyboardInterrupt:
         _stdout_print("\n[info] stopped by user")
 

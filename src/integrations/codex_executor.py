@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import json
 import os
 import sys
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -26,6 +28,56 @@ _ACTIVE_CODEX_AGENT_NAME: ContextVar[str | None] = ContextVar(
     "active_codex_agent_name",
     default=None,
 )
+
+
+class _FilteredErrLog:
+    def __init__(self, target: Any) -> None:
+        self._target = target
+        self._buffer = ""
+
+    @staticmethod
+    def _should_suppress(line: str) -> bool:
+        lowered = line.lower()
+        return "errors.pydantic.dev" in lowered and "/v/missing" in lowered
+
+    def write(self, text: str) -> int:
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            if not self._should_suppress(line):
+                self._target.write(f"{line}\n")
+        return len(text)
+
+    def flush(self) -> None:
+        if self._buffer:
+            if not self._should_suppress(self._buffer):
+                self._target.write(self._buffer)
+            self._buffer = ""
+        self._target.flush()
+
+    def fileno(self) -> int:
+        return self._target.fileno()
+
+    def isatty(self) -> bool:
+        return bool(self._target.isatty())
+
+
+def _stdout_print(*values: object, **kwargs: Any) -> None:
+    file = kwargs.get("file")
+    target = sys.stdout if file is None else file
+    if target is sys.stdout:
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        if values:
+            normalized_values: list[object] = list(values)
+            first_value = str(normalized_values[0])
+            normalized_values[0] = "\n".join(
+                f"[{timestamp}] {line}" for line in first_value.splitlines() or [""]
+            )
+            values = tuple(normalized_values)
+        else:
+            values = (f"[{timestamp}]",)
+
+    builtins.print(*values, **kwargs)
 
 
 @contextmanager
@@ -73,6 +125,7 @@ class CodexMcpExecutor:
     cwd: str | None = None
     close_timeout_seconds: float = 2.0
     on_agent_message: Callable[[AgentTextNotification], None] | None = None
+    verbose_stdout: bool = False
 
     _startup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _session: Any | None = field(default=None, init=False, repr=False)
@@ -234,10 +287,12 @@ class CodexMcpExecutor:
             stdio_cm = None
             session_cm = None
             try:
-                stdio_cm = stdio_client(params, errlog=sys.stderr)
+                stdio_cm = stdio_client(params, errlog=_FilteredErrLog(sys.stderr))
                 read_stream, write_stream = await stdio_cm.__aenter__()
 
                 async def _message_handler(message: Any) -> None:
+                    if self.verbose_stdout:
+                        self._log_codex_event_message(message)
                     notification = self._extract_notification_from_session_message(message)
                     if notification is not None:
                         self._emit_agent_notification(notification)
@@ -353,9 +408,9 @@ class CodexMcpExecutor:
                 if isinstance(item, dict):
                     text = item.get("text")
                     if isinstance(text, str) and text.strip():
-                        print(f"[codex mcp-response] {text.strip()}", flush=True)
+                        _stdout_print(f"[codex mcp-response] {text.strip()}", flush=True)
                         continue
-                print(
+                _stdout_print(
                     f"[codex mcp-response] {json.dumps(item, ensure_ascii=False)}",
                     flush=True,
                 )
@@ -365,18 +420,18 @@ class CodexMcpExecutor:
         if isinstance(structured, dict):
             structured_text = structured.get("content")
             if isinstance(structured_text, str) and structured_text.strip():
-                print(f"[codex mcp-response] {structured_text.strip()}", flush=True)
+                _stdout_print(f"[codex mcp-response] {structured_text.strip()}", flush=True)
                 return
 
         if payload:
-            print(
+            _stdout_print(
                 f"[codex mcp-response] {json.dumps(payload, ensure_ascii=False)}",
                 flush=True,
             )
 
     def _emit_agent_notification(self, notification: AgentTextNotification) -> None:
         agent_name = notification.agent_name or "-"
-        print(
+        _stdout_print(
             "[codex-notification] "
             f"id={notification.message_id} "
             f"phase={notification.phase} "
@@ -394,6 +449,7 @@ class CodexMcpExecutor:
         except Exception:
             pass
 
+    @staticmethod
     @staticmethod
     def _extract_notification_from_session_message(message: Any) -> AgentTextNotification | None:
         notification: Any = message
@@ -416,6 +472,24 @@ class CodexMcpExecutor:
             return None
         return CodexMcpExecutor._extract_notification_from_event_params(params)
 
+    def _log_codex_event_message(self, message: Any) -> None:
+        notification: Any = message
+        if hasattr(message, "root"):
+            notification = message.root
+        if hasattr(notification, "model_dump"):
+            notification = notification.model_dump()
+        elif hasattr(notification, "__dict__"):
+            notification = dict(vars(notification))
+        if not isinstance(notification, dict):
+            return
+        if notification.get("method") != "codex/event":
+            return
+        params = notification.get("params")
+        _stdout_print(
+            f"[codex-event] method=codex/event params={json.dumps(params, ensure_ascii=False)}",
+            flush=True,
+        )
+
     @staticmethod
     def _extract_notification_from_logging_params(params: Any) -> AgentTextNotification | None:
         payload = params.model_dump() if hasattr(params, "model_dump") else params
@@ -426,40 +500,67 @@ class CodexMcpExecutor:
     @staticmethod
     def _extract_notification_from_event_params(params: dict[str, Any]) -> AgentTextNotification | None:
         msg = params.get("msg")
-        if not isinstance(msg, dict) or msg.get("type") != "item_completed":
+        if not isinstance(msg, dict):
             return None
 
-        item = msg.get("item")
-        if not isinstance(item, dict) or item.get("type") != "AgentMessage":
-            return None
+        msg_type = msg.get("type")
+        item: dict[str, Any] | None = None
+        phase: str | None = None
+        text: str | None = None
 
-        phase = item.get("phase")
-        if not isinstance(phase, str) or not phase:
-            return None
+        if msg_type == "item_completed":
+            item = msg.get("item")
+            if not isinstance(item, dict) or item.get("type") != "AgentMessage":
+                return None
 
-        content = item.get("content")
-        if not isinstance(content, list):
-            return None
+            phase_value = item.get("phase")
+            if not isinstance(phase_value, str) or not phase_value:
+                return None
+            phase = phase_value
 
-        text_parts: list[str] = []
-        for content_item in content:
-            if not isinstance(content_item, dict):
-                continue
-            if content_item.get("type") != "Text":
-                continue
-            text = content_item.get("text")
-            if isinstance(text, str) and text.strip():
-                text_parts.append(text.strip())
+            content = item.get("content")
+            if not isinstance(content, list):
+                return None
 
-        if not text_parts:
+            text_parts: list[str] = []
+            for content_item in content:
+                if not isinstance(content_item, dict):
+                    continue
+                if content_item.get("type") != "Text":
+                    continue
+                content_text = content_item.get("text")
+                if isinstance(content_text, str) and content_text.strip():
+                    text_parts.append(content_text.strip())
+            if not text_parts:
+                return None
+            text = "\n".join(text_parts)
+        elif msg_type == "agent_message":
+            message = msg.get("message")
+            if not isinstance(message, str) or not message.strip():
+                return None
+            phase_value = msg.get("phase")
+            phase = phase_value if isinstance(phase_value, str) and phase_value else "commentary"
+            text = message.strip()
+            item = {}
+        elif msg_type == "agent_message_delta":
+            delta = msg.get("delta")
+            if not isinstance(delta, str) or not delta:
+                return None
+            phase_value = msg.get("phase")
+            phase = phase_value if isinstance(phase_value, str) and phase_value else "commentary"
+            text = delta
+            item = {}
+        else:
             return None
 
         agent_name = CodexMcpExecutor._extract_agent_name(params=params, msg=msg, item=item)
-        message_id = item.get("id")
+        message_id = item.get("id") if isinstance(item, dict) else None
+        if not isinstance(message_id, str) or not message_id:
+            message_id = params.get("id")
         return AgentTextNotification(
             message_id=message_id if isinstance(message_id, str) else "",
             phase=phase,
-            text="\n".join(text_parts),
+            text=text,
             agent_name=agent_name,
         )
 
