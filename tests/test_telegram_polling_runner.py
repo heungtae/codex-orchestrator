@@ -423,7 +423,10 @@ poll_timeout = "30"
         async def _fake_run_blocking(func, /, *args, **kwargs):
             return func(*args, **kwargs)
 
-        with patch("scripts.telegram_polling_runner._run_blocking", side_effect=_fake_run_blocking):
+        with (
+            patch("scripts.telegram_polling_runner._run_blocking", side_effect=_fake_run_blocking),
+            patch("scripts.telegram_polling_runner._stdout_print") as mocked_stdout,
+        ):
             output, final_answer_sent = asyncio.run(
                 _run_with_progress_notifications(
                     orchestrator=orchestrator,
@@ -437,7 +440,9 @@ poll_timeout = "30"
                     message_template="working {elapsed_sec}s",
                 )
             )
-        
+
+        mocked_stdout.assert_any_call("[plan.developer] working", flush=True)
+        mocked_stdout.assert_any_call("[plan.developer] done", flush=True)
 
         self.assertEqual(output, "done")
         self.assertTrue(final_answer_sent)

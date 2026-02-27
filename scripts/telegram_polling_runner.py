@@ -481,6 +481,7 @@ async def _run_with_progress_notifications(
         async def _send() -> None:
             try:
                 outbound_text = _format_intermediate_notification_text(notification)
+                _stdout_print(outbound_text, flush=True)
                 await _run_blocking(_safe_send, api, chat_id, outbound_text)
             except Exception as exc:
                 _stdout_print(f"[warn] failed to forward codex notification: {exc}")
