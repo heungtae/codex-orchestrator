@@ -22,8 +22,8 @@ import tomli as tomllib
 from bot.telegram_adapter import parse_update, split_telegram_text
 from integrations.codex_executor import (
     AgentTextNotification,
-    CodexMcpExecutor,
     EchoCodexExecutor,
+    OpenAIAgentsExecutor,
 )
 from main import build_orchestrator
 from workflows.plan_agent_workflow import (
@@ -107,6 +107,15 @@ class _RunnerConfig:
 _MODE_SELECT_CALLBACK: contextvars.ContextVar[
     Any | None
 ] = contextvars.ContextVar("mode_select_callback", default=None)
+
+
+class _SuppressMcpValidationNoiseFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not (
+            "Failed to validate notification:" in message
+            and "codex/event" in message
+        )
 
 
 def _stdout_print(
@@ -194,7 +203,9 @@ class TelegramBotApi:
 
 
 def _configure_logging() -> None:
-    logging.getLogger().setLevel(logging.INFO)
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addFilter(_SuppressMcpValidationNoiseFilter())
 
 
 def _resolve_conf_path(raw_path: str | Path) -> Path:
@@ -543,7 +554,7 @@ async def _run_with_progress_notifications(
 
     executor = _extract_executor(orchestrator)
     previous_callback: Any | None = None
-    if isinstance(executor, CodexMcpExecutor):
+    if isinstance(executor, OpenAIAgentsExecutor):
         previous_callback = executor.on_agent_message
         executor.on_agent_message = _forward_intermediate
 
@@ -559,7 +570,7 @@ async def _run_with_progress_notifications(
         _AGENT_TRANSFER_CALLBACK.reset(agent_transfer_token)
         if pending_sends:
             await asyncio.gather(*list(pending_sends), return_exceptions=True)
-        if isinstance(executor, CodexMcpExecutor):
+        if isinstance(executor, OpenAIAgentsExecutor):
             executor.on_agent_message = previous_callback
 
 
@@ -681,7 +692,7 @@ async def _warmup_codex_mcp(orchestrator: Any) -> bool:
         _stdout_print("[warn] codex.allow_echo_executor=true (debug mode). mcp warmup is skipped.")
         return False
 
-    if not isinstance(executor, CodexMcpExecutor):
+    if not isinstance(executor, OpenAIAgentsExecutor):
         _stdout_print(f"[warn] unknown executor type: {type(executor).__name__}; skip mcp warmup")
         return False
 
@@ -700,7 +711,7 @@ async def _warmup_codex_mcp(orchestrator: Any) -> bool:
 
 async def _close_codex_mcp(orchestrator: Any) -> None:
     executor = _extract_executor(orchestrator)
-    if not isinstance(executor, CodexMcpExecutor):
+    if not isinstance(executor, OpenAIAgentsExecutor):
         return
 
     try:
@@ -752,7 +763,7 @@ async def _run_polling(*, verbose: bool = False) -> None:
     orchestrator = build_orchestrator()
     if verbose:
         executor = _extract_executor(orchestrator)
-        if isinstance(executor, CodexMcpExecutor):
+        if isinstance(executor, OpenAIAgentsExecutor):
             executor.verbose_stdout = True
             _stdout_print("[info] verbose mode enabled: codex events will be printed to stdout")
     active_request_task: asyncio.Task[None] | None = None

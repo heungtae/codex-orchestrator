@@ -74,8 +74,8 @@ class CodexExecutor(Protocol):
 
 
 @dataclass
-class CodexMcpExecutor:
-    """Runs Codex by calling the `codex` MCP tool directly."""
+class OpenAIAgentsExecutor:
+    """Runs Codex via OpenAI Agents SDK MCPServerStdio."""
 
     mcp_command: str = "npx"
     mcp_args: tuple[str, ...] = ("-y", "codex", "mcp-server")
@@ -94,9 +94,8 @@ class CodexMcpExecutor:
     verbose_stdout: bool = False
 
     _startup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
-    _session: Any | None = field(default=None, init=False, repr=False)
-    _session_cm: Any | None = field(default=None, init=False, repr=False)
-    _stdio_cm: Any | None = field(default=None, init=False, repr=False)
+    _server: Any | None = field(default=None, init=False, repr=False)
+    _server_cm: Any | None = field(default=None, init=False, repr=False)
     _started: bool = field(default=False, init=False)
 
     async def run(
@@ -110,8 +109,8 @@ class CodexMcpExecutor:
     ) -> str:
         await self._ensure_started()
 
-        if self._session is None:
-            raise CodexExecutionError("codex mcp session is not initialized")
+        if self._server is None:
+            raise CodexExecutionError("codex mcp server is not initialized")
 
         final_prompt = self._compose_prompt(prompt=prompt, history=history)
         payload: dict[str, Any] = {
@@ -129,7 +128,7 @@ class CodexMcpExecutor:
             payload["developer-instructions"] = system_instructions
 
         try:
-            result = await self._session.call_tool("codex", payload)
+            result = await self._server.call_tool("codex", payload)
         except asyncio.CancelledError:
             await self._cleanup_after_cancel()
             self._set_status(stopped=True, error="request cancelled")
@@ -149,7 +148,6 @@ class CodexMcpExecutor:
         return output_text
 
     async def warmup(self) -> None:
-        """Eagerly start MCP stdio transport and initialize the session."""
         await self._ensure_started()
 
     async def _cleanup_after_cancel(self) -> None:
@@ -163,9 +161,8 @@ class CodexMcpExecutor:
         try:
             await self.close()
         except Exception:
-            self._session = None
-            self._session_cm = None
-            self._stdio_cm = None
+            self._server = None
+            self._server_cm = None
             self._started = False
         finally:
             if current_task is not None:
@@ -178,9 +175,8 @@ class CodexMcpExecutor:
         except Exception:
             pass
         finally:
-            self._session = None
-            self._session_cm = None
-            self._stdio_cm = None
+            self._server = None
+            self._server_cm = None
             self._started = False
             self._set_status(stopped=True, error=error_message)
 
@@ -189,46 +185,28 @@ class CodexMcpExecutor:
             if not self._started:
                 return
 
-            session_close_error: Exception | None = None
-            stdio_close_error: Exception | None = None
-
-            if self._session_cm is not None:
+            server_close_error: Exception | None = None
+            if self._server_cm is not None:
                 try:
                     await asyncio.wait_for(
-                        self._session_cm.__aexit__(None, None, None),
+                        self._server_cm.__aexit__(None, None, None),
                         timeout=self.close_timeout_seconds,
                     )
                 except asyncio.TimeoutError:
-                    session_close_error = RuntimeError(
-                        "codex mcp session close timed out "
+                    server_close_error = RuntimeError(
+                        "codex mcp server close timed out "
                         f"after {self.close_timeout_seconds:.1f}s"
                     )
                 except Exception as exc:
-                    session_close_error = exc
-            self._session = None
-            self._session_cm = None
+                    server_close_error = exc
 
-            if self._stdio_cm is not None:
-                try:
-                    await asyncio.wait_for(
-                        self._stdio_cm.__aexit__(None, None, None),
-                        timeout=self.close_timeout_seconds,
-                    )
-                except asyncio.TimeoutError:
-                    stdio_close_error = RuntimeError(
-                        "codex mcp stdio close timed out "
-                        f"after {self.close_timeout_seconds:.1f}s"
-                    )
-                except Exception as exc:
-                    stdio_close_error = exc
-            self._stdio_cm = None
+            self._server = None
+            self._server_cm = None
             self._started = False
             self._set_status(stopped=True)
 
-            if stdio_close_error is not None:
-                raise stdio_close_error
-            if session_close_error is not None:
-                raise session_close_error
+            if server_close_error is not None:
+                raise server_close_error
 
     async def _ensure_started(self) -> None:
         if self._started:
@@ -238,69 +216,52 @@ class CodexMcpExecutor:
             if self._started:
                 return
 
+            server = None
             try:
-                from mcp import ClientSession
-                from mcp.client.stdio import StdioServerParameters, stdio_client
-            except Exception as exc:  # pragma: no cover - import error path
-                raise CodexExecutionError(
-                    "MCP client SDK is required. Install package `mcp`."
-                ) from exc
-
-            params = StdioServerParameters(
-                command=self.mcp_command,
-                args=list(self.mcp_args),
-            )
-
-            stdio_cm = None
-            session_cm = None
-            try:
-                stdio_cm = stdio_client(params)
-                read_stream, write_stream = await stdio_cm.__aenter__()
-
-                async def _message_handler(message: Any) -> None:
-                    if self.verbose_stdout:
-                        self._log_codex_event_message(message)
-                    notification = self._extract_notification_from_session_message(message)
-                    if notification is not None:
-                        self._emit_agent_notification(notification)
-
-                async def _logging_callback(params: Any) -> None:
-                    notification = self._extract_notification_from_logging_params(params)
-                    if notification is not None:
-                        self._emit_agent_notification(notification)
-
-                session_cm = ClientSession(
-                    read_stream,
-                    write_stream,
-                    message_handler=_message_handler,
-                    logging_callback=_logging_callback,
-                )
-                session = await session_cm.__aenter__()
-                await session.initialize()
-
-                tools = await session.list_tools()
-                tool_names = {getattr(tool, "name", "") for tool in getattr(tools, "tools", [])}
+                server = self._create_mcp_server()
+                await server.__aenter__()
+                tools = await server.list_tools()
+                tool_names = {getattr(tool, "name", "") for tool in tools}
                 if "codex" not in tool_names:
                     raise CodexExecutionError("mcp server does not expose required tool: codex")
             except Exception as exc:
-                if session_cm is not None:
+                if server is not None:
                     try:
-                        await session_cm.__aexit__(None, None, None)
-                    except Exception:
-                        pass
-                if stdio_cm is not None:
-                    try:
-                        await stdio_cm.__aexit__(None, None, None)
+                        await server.__aexit__(None, None, None)
                     except Exception:
                         pass
                 self._set_status(error=f"failed to start codex mcp server: {exc}")
                 raise CodexExecutionError(f"failed to start codex mcp server: {exc}") from exc
 
-            self._session = session
-            self._session_cm = session_cm
-            self._stdio_cm = stdio_cm
+            self._server = server
+            self._server_cm = server
             self._started = True
             self._set_status(running=True, ready=True)
+
+    def _create_mcp_server(self) -> Any:
+        try:
+            from agents.mcp import MCPServerStdio
+        except Exception as exc:  # pragma: no cover - import error path
+            raise CodexExecutionError(
+                "OpenAI Agents SDK is required. Install package `openai-agents`."
+            ) from exc
+
+        return MCPServerStdio(
+            name=self.mcp_server_name,
+            params={
+                "command": self.mcp_command,
+                "args": list(self.mcp_args),
+            },
+            client_session_timeout_seconds=self.client_session_timeout_seconds,
+            message_handler=self._handle_mcp_message,
+        )
+
+    async def _handle_mcp_message(self, message: Any) -> None:
+        if self.verbose_stdout:
+            self._log_codex_event_message(message)
+        notification = self._extract_notification_from_session_message(message)
+        if notification is not None:
+            self._emit_agent_notification(notification)
 
     def _compose_prompt(self, *, prompt: str, history: list[dict[str, Any]] | None) -> str:
         if not self.include_history or not history:
@@ -429,14 +390,13 @@ class CodexMcpExecutor:
         if not isinstance(notification, dict):
             return None
 
-        method = notification.get("method")
-        if method != "codex/event":
+        if notification.get("method") != "codex/event":
             return None
 
         params = notification.get("params")
         if not isinstance(params, dict):
             return None
-        return CodexMcpExecutor._extract_notification_from_event_params(params)
+        return OpenAIAgentsExecutor._extract_notification_from_event_params(params)
 
     def _log_codex_event_message(self, message: Any) -> None:
         notification: Any = message
@@ -455,13 +415,6 @@ class CodexMcpExecutor:
             f"[codex-event] method=codex/event params={json.dumps(params, ensure_ascii=False)}",
             flush=True,
         )
-
-    @staticmethod
-    def _extract_notification_from_logging_params(params: Any) -> AgentTextNotification | None:
-        payload = params.model_dump() if hasattr(params, "model_dump") else params
-        if not isinstance(payload, dict):
-            return None
-        return CodexMcpExecutor._extract_notification_from_event_params(payload)
 
     @staticmethod
     def _extract_notification_from_event_params(params: dict[str, Any]) -> AgentTextNotification | None:
@@ -511,7 +464,7 @@ class CodexMcpExecutor:
         elif msg_type == "agent_message_delta":
             delta = msg.get("delta")
             if not isinstance(delta, str) or not delta:
-                return None
+                return Nonagents.mcp.MCPServerStdioe
             phase_value = msg.get("phase")
             phase = phase_value if isinstance(phase_value, str) and phase_value else "commentary"
             text = delta
@@ -519,7 +472,7 @@ class CodexMcpExecutor:
         else:
             return None
 
-        agent_name = CodexMcpExecutor._extract_agent_name(params=params, msg=msg, item=item)
+        agent_name = OpenAIAgentsExecutor._extract_agent_name(params=params, msg=msg, item=item)
         message_id = item.get("id") if isinstance(item, dict) else None
         if not isinstance(message_id, str) or not message_id:
             message_id = params.get("id")
@@ -583,12 +536,12 @@ class CodexMcpExecutor:
             if error and hasattr(tracker, "record_error"):
                 tracker.record_error(error)
         except Exception:
-            # Tracker failure must not block request execution.
             pass
 
 
-# Backward-compatible alias for older imports.
-AgentsSdkCodexExecutor = CodexMcpExecutor
+# Backward-compatible names for existing imports.
+CodexMcpExecutor = OpenAIAgentsExecutor
+AgentsSdkCodexExecutor = OpenAIAgentsExecutor
 
 
 class EchoCodexExecutor:

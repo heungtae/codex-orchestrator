@@ -12,8 +12,8 @@ from core.profiles import load_profiles_from_conf, resolve_conf_path
 from core.session_manager import SessionManager
 from core.trace_logger import TraceLogger
 from integrations.codex_executor import (
-    CodexMcpExecutor,
     EchoCodexExecutor,
+    OpenAIAgentsExecutor,
 )
 from integrations.codex_mcp import CodexMcpServer
 from workflows.agent_factory import AgentFactory
@@ -270,7 +270,7 @@ def build_orchestrator() -> BotOrchestrator:
         # Explicitly gated for local debugging only.
         executor = EchoCodexExecutor()
     else:
-        executor = CodexMcpExecutor(
+        executor = OpenAIAgentsExecutor(
             mcp_command=codex_config.mcp_command,
             mcp_args=codex_config.mcp_args,
             client_session_timeout_seconds=codex_config.mcp_client_timeout_seconds,

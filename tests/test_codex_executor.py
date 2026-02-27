@@ -3,7 +3,11 @@ import io
 import unittest
 from contextlib import redirect_stdout
 
-from integrations.codex_executor import AgentTextNotification, CodexExecutionError, CodexMcpExecutor
+from integrations.codex_executor import (
+    AgentTextNotification,
+    CodexExecutionError,
+    OpenAIAgentsExecutor,
+)
 
 
 class _Tracker:
@@ -26,68 +30,60 @@ class _Tracker:
         self.errors.append(message)
 
 
-class _FailingSession:
+class _FakeServer:
+    def __init__(self, *, tools: list[str], result=None, error: Exception | None = None) -> None:
+        self._tools = tools
+        self._result = result
+        self._error = error
+        self.entered = False
+        self.exited = False
+        self.called_payload = None
+
+    async def __aenter__(self):
+        self.entered = True
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.exited = True
+        return False
+
+    async def list_tools(self):
+        return [type("Tool", (), {"name": name}) for name in self._tools]
+
     async def call_tool(self, tool_name, payload):
-        raise RuntimeError("broken pipe")
+        self.called_payload = payload
+        if self._error is not None:
+            raise self._error
+        return self._result
 
 
-class _CancelledSession:
-    async def call_tool(self, tool_name, payload):
-        raise asyncio.CancelledError()
-
-
-class _TextResponseSession:
-    async def call_tool(self, tool_name, payload):
-        return {"content": [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}]}
-
-
-class _StructuredResponseSession:
-    async def call_tool(self, tool_name, payload):
-        return {"structuredContent": {"content": "structured message"}}
-
-
-class _NoopAsyncContext:
-    async def __aexit__(self, exc_type, exc, tb) -> bool:
+class _SlowExitServer(_FakeServer):
+    async def __aexit__(self, exc_type, exc, tb):
+        await asyncio.sleep(0.5)
+        self.exited = True
         return False
 
 
-class _TrackingAsyncContext:
-    def __init__(self) -> None:
-        self.exit_calls = 0
+class _TestExecutor(OpenAIAgentsExecutor):
+    def __init__(self, server: _FakeServer, **kwargs):
+        super().__init__(**kwargs)
+        self._injected_server = server
 
-    async def __aexit__(self, exc_type, exc, tb) -> bool:
-        self.exit_calls += 1
-        return False
-
-
-class _FailingAsyncContext:
-    async def __aexit__(self, exc_type, exc, tb) -> bool:
-        raise RuntimeError("close failed")
+    def _create_mcp_server(self):
+        return self._injected_server
 
 
-class _SlowAsyncContext:
-    def __init__(self, delay_sec: float) -> None:
-        self.delay_sec = delay_sec
-
-    async def __aexit__(self, exc_type, exc, tb) -> bool:
-        await asyncio.sleep(self.delay_sec)
-        return False
-
-
-class CodexMcpExecutorTests(unittest.TestCase):
+class OpenAIAgentsExecutorTests(unittest.TestCase):
     def test_transport_error_marks_status_stopped(self) -> None:
         tracker = _Tracker()
-        executor = CodexMcpExecutor(status_tracker=tracker)
-        executor._started = True
-        executor._session = _FailingSession()
-        executor._session_cm = _NoopAsyncContext()
-        executor._stdio_cm = _NoopAsyncContext()
+        server = _FakeServer(tools=["codex"], error=RuntimeError("broken pipe"))
+        executor = _TestExecutor(server=server, status_tracker=tracker)
 
         with self.assertRaises(CodexExecutionError):
             asyncio.run(executor.run(prompt="hello"))
 
         self.assertFalse(executor._started)
-        self.assertIsNone(executor._session)
+        self.assertIsNone(executor._server)
         self.assertFalse(tracker.running)
         self.assertFalse(tracker.ready)
         self.assertGreaterEqual(tracker.stopped_calls, 1)
@@ -95,62 +91,38 @@ class CodexMcpExecutorTests(unittest.TestCase):
 
     def test_cancelled_call_resets_executor_state(self) -> None:
         tracker = _Tracker()
-        executor = CodexMcpExecutor(status_tracker=tracker)
-        session_cm = _TrackingAsyncContext()
-        stdio_cm = _TrackingAsyncContext()
-        executor._started = True
-        executor._session = _CancelledSession()
-        executor._session_cm = session_cm
-        executor._stdio_cm = stdio_cm
+        server = _FakeServer(tools=["codex"], error=asyncio.CancelledError())
+        executor = _TestExecutor(server=server, status_tracker=tracker)
 
         with self.assertRaises(asyncio.CancelledError):
             asyncio.run(executor.run(prompt="hello"))
 
         self.assertFalse(executor._started)
-        self.assertIsNone(executor._session)
-        self.assertIsNone(executor._session_cm)
-        self.assertIsNone(executor._stdio_cm)
-        self.assertEqual(session_cm.exit_calls, 1)
-        self.assertEqual(stdio_cm.exit_calls, 1)
+        self.assertIsNone(executor._server)
+        self.assertIsNone(executor._server_cm)
         self.assertFalse(tracker.running)
         self.assertFalse(tracker.ready)
         self.assertGreaterEqual(tracker.stopped_calls, 1)
         self.assertTrue(any("request cancelled" in message for message in tracker.errors))
 
-    def test_close_resets_state_even_when_session_close_fails(self) -> None:
-        executor = CodexMcpExecutor()
-        executor._started = True
-        executor._session = object()
-        executor._session_cm = _FailingAsyncContext()
-        executor._stdio_cm = _NoopAsyncContext()
-
-        with self.assertRaises(RuntimeError):
-            asyncio.run(executor.close())
-
-        self.assertFalse(executor._started)
-        self.assertIsNone(executor._session)
-        self.assertIsNone(executor._session_cm)
-        self.assertIsNone(executor._stdio_cm)
-
     def test_close_times_out_and_resets_state(self) -> None:
-        executor = CodexMcpExecutor(close_timeout_seconds=0.01)
-        executor._started = True
-        executor._session = object()
-        executor._session_cm = _SlowAsyncContext(delay_sec=0.5)
-        executor._stdio_cm = _NoopAsyncContext()
+        server = _SlowExitServer(tools=["codex"], result={"content": [{"text": "ok"}]})
+        executor = _TestExecutor(server=server, close_timeout_seconds=0.01)
+        asyncio.run(executor.warmup())
 
         with self.assertRaises(RuntimeError):
             asyncio.run(executor.close())
 
         self.assertFalse(executor._started)
-        self.assertIsNone(executor._session)
-        self.assertIsNone(executor._session_cm)
-        self.assertIsNone(executor._stdio_cm)
+        self.assertIsNone(executor._server)
+        self.assertIsNone(executor._server_cm)
 
     def test_run_prints_all_text_response_messages(self) -> None:
-        executor = CodexMcpExecutor()
-        executor._started = True
-        executor._session = _TextResponseSession()
+        server = _FakeServer(
+            tools=["codex"],
+            result={"content": [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}]},
+        )
+        executor = _TestExecutor(server=server)
 
         captured = io.StringIO()
         with redirect_stdout(captured):
@@ -161,17 +133,34 @@ class CodexMcpExecutorTests(unittest.TestCase):
         self.assertIn("[codex mcp-response] first", logs)
         self.assertIn("[codex mcp-response] second", logs)
 
-    def test_run_prints_structured_response_message(self) -> None:
-        executor = CodexMcpExecutor()
-        executor._started = True
-        executor._session = _StructuredResponseSession()
+    def test_run_includes_policy_payload(self) -> None:
+        server = _FakeServer(
+            tools=["codex"],
+            result={"content": [{"type": "text", "text": "done"}]},
+        )
+        executor = _TestExecutor(
+            server=server,
+            approval_policy="never",
+            sandbox="workspace-write",
+            default_model="gpt-5",
+            cwd="/tmp/work",
+        )
 
-        captured = io.StringIO()
-        with redirect_stdout(captured):
-            output = asyncio.run(executor.run(prompt="hello"))
+        output = asyncio.run(executor.run(prompt="hello", system_instructions="sys"))
 
-        self.assertEqual(output, "structured message")
-        self.assertIn("[codex mcp-response] structured message", captured.getvalue())
+        self.assertEqual(output, "done")
+        self.assertEqual(server.called_payload["approval-policy"], "never")
+        self.assertEqual(server.called_payload["sandbox"], "workspace-write")
+        self.assertEqual(server.called_payload["model"], "gpt-5")
+        self.assertEqual(server.called_payload["cwd"], "/tmp/work")
+        self.assertEqual(server.called_payload["developer-instructions"], "sys")
+
+    def test_warmup_fails_when_codex_tool_missing(self) -> None:
+        server = _FakeServer(tools=["other"], result={"content": [{"text": "x"}]})
+        executor = _TestExecutor(server=server)
+
+        with self.assertRaises(CodexExecutionError):
+            asyncio.run(executor.warmup())
 
     def test_extract_notification_from_event_params(self) -> None:
         params = {
@@ -187,7 +176,7 @@ class CodexMcpExecutorTests(unittest.TestCase):
             }
         }
 
-        notification = CodexMcpExecutor._extract_notification_from_event_params(params)
+        notification = OpenAIAgentsExecutor._extract_notification_from_event_params(params)
         self.assertEqual(
             notification,
             AgentTextNotification(
@@ -214,77 +203,11 @@ class CodexMcpExecutorTests(unittest.TestCase):
             },
         }
 
-        notification = CodexMcpExecutor._extract_notification_from_session_message(payload)
+        notification = OpenAIAgentsExecutor._extract_notification_from_session_message(payload)
         self.assertIsNotNone(notification)
         self.assertEqual(notification.message_id, "msg_2")
         self.assertEqual(notification.phase, "final_answer")
         self.assertEqual(notification.text, "done")
-
-    def test_extract_notification_from_agent_message_event(self) -> None:
-        params = {
-            "id": "3",
-            "msg": {
-                "type": "agent_message",
-                "message": "working on it",
-                "phase": "commentary",
-                "agent_name": "single.developer",
-            },
-        }
-
-        notification = CodexMcpExecutor._extract_notification_from_event_params(params)
-        self.assertEqual(
-            notification,
-            AgentTextNotification(
-                message_id="3",
-                phase="commentary",
-                text="working on it",
-                agent_name="single.developer",
-            ),
-        )
-
-    def test_extract_notification_from_agent_message_delta_event(self) -> None:
-        params = {
-            "id": "4",
-            "msg": {
-                "type": "agent_message_delta",
-                "delta": ".",
-            },
-        }
-
-        notification = CodexMcpExecutor._extract_notification_from_event_params(params)
-        self.assertEqual(
-            notification,
-            AgentTextNotification(
-                message_id="4",
-                phase="commentary",
-                text=".",
-                agent_name=None,
-            ),
-        )
-
-    def test_emit_agent_notification_calls_callback(self) -> None:
-        captured: list[AgentTextNotification] = []
-        executor = CodexMcpExecutor(on_agent_message=captured.append)
-        notification = AgentTextNotification(
-            message_id="msg_3",
-            phase="commentary",
-            text="working",
-            agent_name="single.developer",
-        )
-
-        executor._emit_agent_notification(notification)
-        self.assertEqual(captured, [notification])
-
-    def test_log_codex_event_message_prints_params(self) -> None:
-        executor = CodexMcpExecutor(verbose_stdout=True)
-        payload = {
-            "method": "codex/event",
-            "params": {"id": "9", "msg": {"type": "agent_message", "message": "hi"}},
-        }
-        captured = io.StringIO()
-        with redirect_stdout(captured):
-            executor._log_codex_event_message(payload)
-        self.assertIn("[codex-event] method=codex/event params=", captured.getvalue())
 
 
 if __name__ == "__main__":
