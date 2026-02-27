@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from integrations.codex_executor import AgentTextNotification, CodexMcpExecutor
 from scripts.telegram_polling_runner import (
+    _AgentMessageDispatcher,
     _parse_args,
     _cancel_inflight_request,
     _format_intermediate_notification_text,
@@ -65,18 +66,28 @@ class _ModeAwareOrchestrator:
 
 
 class _ExecutorWiredOrchestrator:
-    def __init__(self, notifications: list[AgentTextNotification], output: str = "done") -> None:
+    def __init__(
+        self,
+        notifications: list[AgentTextNotification],
+        output: str = "done",
+        mcp_responses: list[str] | None = None,
+    ) -> None:
         self._notifications = notifications
         self.output = output
+        self._mcp_responses = mcp_responses or []
         self.single_workflow = type("SingleWorkflow", (), {})()
         self.single_workflow.developer = type("Dev", (), {})()
         self.single_workflow.developer._executor = CodexMcpExecutor()
 
     async def handle_message(self, chat_id: str, user_id: str, text: str) -> str:
-        callback = self.single_workflow.developer._executor.on_agent_message
-        if callback is not None:
+        agent_callback = self.single_workflow.developer._executor.on_agent_message
+        if agent_callback is not None:
             for notification in self._notifications:
-                callback(notification)
+                agent_callback(notification)
+        mcp_callback = self.single_workflow.developer._executor.on_mcp_response
+        if mcp_callback is not None:
+            for response in self._mcp_responses:
+                mcp_callback(response)
         return self.output
 
 
@@ -187,7 +198,7 @@ class TelegramPollingRunnerProgressTests(unittest.TestCase):
 
         asyncio.run(_scenario())
         self.assertEqual(orchestrator.calls, 1)
-        self.assertEqual(api.messages, [("100", "done")])
+        self.assertEqual(api.messages, [("100", "[agent transfer] threadId:100:200\ndone")])
 
     def test_process_inbound_request_sends_mode_notice_before_output(self) -> None:
         orchestrator = _ModeAwareOrchestrator(mode="plan", output="done")
@@ -218,7 +229,7 @@ class TelegramPollingRunnerProgressTests(unittest.TestCase):
 
         asyncio.run(_scenario())
         self.assertEqual(orchestrator.handle_calls, 1)
-        self.assertEqual(api.messages, [("100", "done")])
+        self.assertEqual(api.messages, [("100", "[agent transfer] threadId:100:200\ndone")])
 
     def test_run_polling_creates_conf_before_token_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -441,14 +452,95 @@ poll_timeout = "30"
                 )
             )
 
-        mocked_stdout.assert_any_call("[plan.developer] working", flush=True)
-        mocked_stdout.assert_any_call("[plan.developer] done", flush=True)
+        mocked_stdout.assert_any_call(
+            "[agent transfer] threadId:100:200\n[plan.developer] working",
+            flush=True,
+        )
+        mocked_stdout.assert_any_call(
+            "[agent transfer] threadId:100:200\n[plan.developer] done",
+            flush=True,
+        )
 
         self.assertEqual(output, "done")
         self.assertTrue(final_answer_sent)
         self.assertEqual(
             api.messages,
-            [("100", "[plan.developer] working"), ("100", "[plan.developer] done")],
+            [
+                ("100", "[agent transfer] threadId:100:200\n[plan.developer] working"),
+                ("100", "[agent transfer] threadId:100:200\n[plan.developer] done"),
+            ],
+        )
+
+    def test_run_with_progress_notifications_forwards_non_commentary_phase(self) -> None:
+        orchestrator = _ExecutorWiredOrchestrator(
+            notifications=[
+                AgentTextNotification(
+                    message_id="msg_1",
+                    phase="analysis",
+                    text="draft plan",
+                    agent_name="plan.planner",
+                ),
+            ],
+            output="done",
+        )
+        api = _FakeTelegramApi()
+
+        async def _fake_run_blocking(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch("scripts.telegram_polling_runner._run_blocking", side_effect=_fake_run_blocking):
+            output, final_answer_sent = asyncio.run(
+                _run_with_progress_notifications(
+                    orchestrator=orchestrator,
+                    api=api,
+                    chat_id="100",
+                    user_id="200",
+                    text="hello",
+                    enabled=True,
+                    initial_delay_sec=0.1,
+                    interval_sec=0.1,
+                    message_template="working {elapsed_sec}s",
+                )
+            )
+
+        self.assertEqual(output, "done")
+        self.assertFalse(final_answer_sent)
+        self.assertEqual(
+            api.messages,
+            [("100", "[agent transfer] threadId:100:200\n[plan.planner] draft plan")],
+        )
+
+    def test_run_with_progress_notifications_forwards_mcp_response_logs(self) -> None:
+        orchestrator = _ExecutorWiredOrchestrator(
+            notifications=[],
+            output="done",
+            mcp_responses=["[codex mcp-response] {\"mode\":\"single\"}"],
+        )
+        api = _FakeTelegramApi()
+
+        async def _fake_run_blocking(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch("scripts.telegram_polling_runner._run_blocking", side_effect=_fake_run_blocking):
+            output, final_answer_sent = asyncio.run(
+                _run_with_progress_notifications(
+                    orchestrator=orchestrator,
+                    api=api,
+                    chat_id="100",
+                    user_id="200",
+                    text="hello",
+                    enabled=True,
+                    initial_delay_sec=0.1,
+                    interval_sec=0.1,
+                    message_template="working {elapsed_sec}s",
+                )
+            )
+
+        self.assertEqual(output, "done")
+        self.assertFalse(final_answer_sent)
+        self.assertEqual(
+            api.messages,
+            [("100", "[agent transfer] threadId:100:200\n[codex mcp-response] {\"mode\":\"single\"}")],
         )
 
     def test_process_inbound_request_skips_output_when_final_answer_was_forwarded(self) -> None:
@@ -489,8 +581,85 @@ poll_timeout = "30"
         from scripts.telegram_polling_runner import _process_inbound_request
 
         asyncio.run(_scenario())
-        self.assertEqual(api.messages, [("100", "[plan.developer] final from event")])
+        self.assertEqual(
+            api.messages,
+            [("100", "[agent transfer] threadId:100:200\n[plan.developer] final from event")],
+        )
 
+    def test_process_inbound_request_skips_duplicate_when_mcp_response_matches_output(self) -> None:
+        output_text = "현재 thread id는 아래 값입니다."
+        orchestrator = _ExecutorWiredOrchestrator(
+            notifications=[],
+            output=output_text,
+            mcp_responses=[f"[codex mcp-response] {output_text}"],
+        )
+        api = _FakeTelegramApi()
+
+        async def _fake_run_blocking(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        async def _scenario() -> None:
+            with (
+                patch("scripts.telegram_polling_runner._close_codex_mcp") as mocked_close,
+                patch("scripts.telegram_polling_runner._run_blocking", side_effect=_fake_run_blocking),
+            ):
+                await _process_inbound_request(
+                    orchestrator=orchestrator,
+                    api=api,
+                    chat_id="100",
+                    user_id="200",
+                    text="hello",
+                    progress_notify=True,
+                    progress_initial_delay_sec=0.1,
+                    progress_interval_sec=0.1,
+                    progress_message_template="working {elapsed_sec}s",
+                )
+                mocked_close.assert_called_once_with(orchestrator)
+
+        from scripts.telegram_polling_runner import _process_inbound_request
+
+        asyncio.run(_scenario())
+        self.assertEqual(
+            api.messages,
+            [("100", f"[agent transfer] threadId:100:200\n[codex mcp-response] {output_text}")],
+        )
+
+
+class AgentMessageDispatcherTests(unittest.TestCase):
+    def test_dispatch_prints_and_sends_to_stdout_and_telegram(self) -> None:
+        api = _FakeTelegramApi()
+        message_text = "agent log"
+
+        async def _scenario() -> None:
+            dispatcher = _AgentMessageDispatcher(
+                api=api,
+                chat_id="100",
+                user_id="200",
+                loop=asyncio.get_running_loop(),
+            )
+
+            def _run_blocking_sync(func, /, *args, **kwargs):
+                return func(*args, **kwargs)
+
+            def _stub_safe_send(api_obj: _FakeTelegramApi, chat_id: str, text: str) -> None:
+                api_obj.send_message(chat_id=chat_id, text=text)
+
+            with (
+                patch("scripts.telegram_polling_runner._stdout_print") as mocked_stdout,
+                patch(
+                    "scripts.telegram_polling_runner._run_blocking",
+                    side_effect=_run_blocking_sync,
+                ),
+                patch("scripts.telegram_polling_runner._safe_send", side_effect=_stub_safe_send),
+            ):
+                dispatcher.dispatch(message_text)
+                await dispatcher.drain()
+
+            wrapped = "[agent transfer] threadId:100:200\nagent log"
+            mocked_stdout.assert_called_once_with(wrapped, flush=True)
+            self.assertEqual(api.messages, [("100", wrapped)])
+
+        asyncio.run(_scenario())
 
 if __name__ == "__main__":
     unittest.main()

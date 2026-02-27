@@ -162,6 +162,22 @@ class OpenAIAgentsExecutorTests(unittest.TestCase):
         with self.assertRaises(CodexExecutionError):
             asyncio.run(executor.warmup())
 
+    def test_run_forwards_mcp_response_messages_to_callback(self) -> None:
+        server = _FakeServer(
+            tools=["codex"],
+            result={"content": [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}]},
+        )
+        captured_lines: list[str] = []
+        executor = _TestExecutor(server=server, on_mcp_response=captured_lines.append)
+
+        output = asyncio.run(executor.run(prompt="hello"))
+
+        self.assertEqual(output, "first\nsecond")
+        self.assertEqual(
+            captured_lines,
+            ["[codex mcp-response] first", "[codex mcp-response] second"],
+        )
+
     def test_extract_notification_from_event_params(self) -> None:
         params = {
             "msg": {
@@ -208,6 +224,28 @@ class OpenAIAgentsExecutorTests(unittest.TestCase):
         self.assertEqual(notification.message_id, "msg_2")
         self.assertEqual(notification.phase, "final_answer")
         self.assertEqual(notification.text, "done")
+
+    def test_extract_notification_from_agent_message_delta(self) -> None:
+        params = {
+            "id": "msg_delta",
+            "msg": {
+                "type": "agent_message_delta",
+                "phase": "analysis",
+                "delta": "draft step",
+                "agent_name": "plan.planner",
+            },
+        }
+
+        notification = OpenAIAgentsExecutor._extract_notification_from_event_params(params)
+        self.assertEqual(
+            notification,
+            AgentTextNotification(
+                message_id="msg_delta",
+                phase="analysis",
+                text="draft step",
+                agent_name="plan.planner",
+            ),
+        )
 
 
 if __name__ == "__main__":

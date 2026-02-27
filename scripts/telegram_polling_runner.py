@@ -15,7 +15,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Coroutine
 
 import tomli as tomllib
 
@@ -447,6 +447,65 @@ def _format_inbound_stdout(*, chat_id: str, user_id: str, text: str) -> str:
     return f"[telegram-inbound] chat_id={chat_id} user_id={user_id} text={escaped_text}"
 
 
+def _thread_id(chat_id: str, user_id: str) -> str:
+    return f"{chat_id}:{user_id}"
+
+
+def _format_threaded_outbound_message(*, chat_id: str, user_id: str, text: str) -> str:
+    return f"[agent transfer] threadId:{_thread_id(chat_id, user_id)}\n{text}"
+
+
+class _AgentMessageDispatcher:
+    def __init__(
+        self,
+        *,
+        api: TelegramBotApi,
+        chat_id: str,
+        user_id: str,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        self._api = api
+        self._chat_id = chat_id
+        self._user_id = user_id
+        self._loop = loop
+        self.pending_sends: set[asyncio.Task[None]] = set()
+
+    def dispatch(self, text: str) -> None:
+        outbound = _format_threaded_outbound_message(
+            chat_id=self._chat_id,
+            user_id=self._user_id,
+            text=text,
+        )
+        _stdout_print(outbound, flush=True)
+        self._schedule(self._send(outbound))
+
+    def _schedule(self, coroutine: Coroutine[Any, Any, None]) -> None:
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+            return
+
+        if running_loop is self._loop:
+            task = self._loop.create_task(coroutine)
+            self.pending_sends.add(task)
+            task.add_done_callback(self.pending_sends.discard)
+            return
+
+        asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+
+    async def _send(self, text: str) -> None:
+        try:
+            await _run_blocking(_safe_send, self._api, self._chat_id, text)
+        except Exception as exc:
+            _stdout_print(f"[warn] failed to forward agent message: {exc}")
+
+    async def drain(self) -> None:
+        if not self.pending_sends:
+            return
+        await asyncio.gather(*list(self.pending_sends), return_exceptions=True)
+
+
 def _format_intermediate_notification_text(notification: AgentTextNotification) -> str:
     if notification.agent_name:
         return f"[{notification.agent_name}] {notification.text}"
@@ -466,98 +525,58 @@ async def _run_with_progress_notifications(
     message_template: str,
 ) -> tuple[str, bool]:
     del enabled, initial_delay_sec, interval_sec, message_template
-    loop = asyncio.get_running_loop()
-    pending_sends: set[asyncio.Task[None]] = set()
+    dispatcher = _AgentMessageDispatcher(
+        api=api,
+        chat_id=chat_id,
+        user_id=user_id,
+        loop=asyncio.get_running_loop(),
+    )
 
     final_answer_sent = False
+    mcp_payload_texts: set[str] = set()
 
     def _forward_intermediate(notification: AgentTextNotification) -> None:
         nonlocal final_answer_sent
-        if notification.phase not in {"commentary", "final_answer"}:
+        if not notification.text.strip():
             return
         if notification.phase == "final_answer":
             final_answer_sent = True
 
-        async def _send() -> None:
-            try:
-                outbound_text = _format_intermediate_notification_text(notification)
-                _stdout_print(outbound_text, flush=True)
-                await _run_blocking(_safe_send, api, chat_id, outbound_text)
-            except Exception as exc:
-                _stdout_print(f"[warn] failed to forward codex notification: {exc}")
-
         try:
-            running_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            asyncio.run_coroutine_threadsafe(_send(), loop)
-            return
-
-        if running_loop is loop:
-            task = loop.create_task(_send())
-            pending_sends.add(task)
-            task.add_done_callback(pending_sends.discard)
-            return
-
-        asyncio.run_coroutine_threadsafe(_send(), loop)
+            outbound_text = _format_intermediate_notification_text(notification)
+            dispatcher.dispatch(outbound_text)
+        except Exception as exc:
+            _stdout_print(f"[warn] failed to forward codex notification: {exc}")
 
     def _on_mode_selected(mode: str, reason: str) -> None:
         del reason
-
-        async def _send() -> None:
-            try:
-                await _run_blocking(
-                    _safe_send, api, chat_id, f"[auto mode select] this request will run in {mode} mode."
-                )
-            except Exception as exc:
-                _stdout_print(f"[warn] failed to forward mode select notification: {exc}")
-
-        try:
-            running_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            asyncio.run_coroutine_threadsafe(_send(), loop)
-            return
-
-        if running_loop is loop:
-            task = loop.create_task(_send())
-            pending_sends.add(task)
-            task.add_done_callback(pending_sends.discard)
-            return
-
-        asyncio.run_coroutine_threadsafe(_send(), loop)
+        dispatcher.dispatch(f"[auto mode select] this request will run in {mode} mode.")
 
     def _on_agent_transfer(from_agent: str, to_agent: str, round: int) -> None:
         round_str = f" (round {round})" if round > 0 else ""
         message = f"[agent transfer] {from_agent} → {to_agent}{round_str}"
-        _stdout_print(message)
+        dispatcher.dispatch(message)
 
-        async def _send() -> None:
-            try:
-                await _run_blocking(_safe_send, api, chat_id, message)
-            except Exception as exc:
-                _stdout_print(f"[warn] failed to forward agent transfer notification: {exc}")
-
-        try:
-            running_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            asyncio.run_coroutine_threadsafe(_send(), loop)
-            return
-
-        if running_loop is loop:
-            task = loop.create_task(_send())
-            pending_sends.add(task)
-            task.add_done_callback(pending_sends.discard)
-            return
-
-        asyncio.run_coroutine_threadsafe(_send(), loop)
+    def _forward_mcp_response(line: str) -> None:
+        prefix = "[codex mcp-response] "
+        normalized = line.strip()
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :].strip()
+        if normalized:
+            mcp_payload_texts.add(normalized)
+        dispatcher.dispatch(line)
 
     mode_select_token = _MODE_SELECT_CALLBACK.set(_on_mode_selected)
     agent_transfer_token = _AGENT_TRANSFER_CALLBACK.set(_on_agent_transfer)
 
     executor = _extract_executor(orchestrator)
     previous_callback: Any | None = None
+    previous_mcp_response_callback: Any | None = None
     if isinstance(executor, OpenAIAgentsExecutor):
         previous_callback = executor.on_agent_message
+        previous_mcp_response_callback = executor.on_mcp_response
         executor.on_agent_message = _forward_intermediate
+        executor.on_mcp_response = _forward_mcp_response
 
     try:
         plan_workflow = getattr(orchestrator, "plan_workflow", None)
@@ -565,14 +584,16 @@ async def _run_with_progress_notifications(
             plan_workflow.on_mode_selected = _on_mode_selected
             plan_workflow.on_agent_transfer = _on_agent_transfer
         output = await orchestrator.handle_message(chat_id, user_id, text)
+        if output.strip() and output.strip() in mcp_payload_texts:
+            final_answer_sent = True
         return output, final_answer_sent
     finally:
         _MODE_SELECT_CALLBACK.reset(mode_select_token)
         _AGENT_TRANSFER_CALLBACK.reset(agent_transfer_token)
-        if pending_sends:
-            await asyncio.gather(*list(pending_sends), return_exceptions=True)
+        await dispatcher.drain()
         if isinstance(executor, OpenAIAgentsExecutor):
             executor.on_agent_message = previous_callback
+            executor.on_mcp_response = previous_mcp_response_callback
 
 
 async def _process_inbound_request(
@@ -608,7 +629,9 @@ async def _process_inbound_request(
             _stdout_print(f"[warn] failed to close codex mcp session after request: {exc}")
 
     if not final_answer_sent:
-        await _run_blocking(_safe_send, api, chat_id, output)
+        outbound = _format_threaded_outbound_message(chat_id=chat_id, user_id=user_id, text=output)
+        _stdout_print(outbound, flush=True)
+        await _run_blocking(_safe_send, api, chat_id, outbound)
 
 
 async def _cancel_inflight_request(

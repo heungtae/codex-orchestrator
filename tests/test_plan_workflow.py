@@ -187,8 +187,27 @@ class PlanWorkflowTests(unittest.TestCase):
             reviewer=FakeReviewer(
                 decisions=[
                     ReviewDecision(result="needs_changes", feedback="fix A"),
+                    ReviewDecision(result="needs_changes", feedback="fix B"),
                 ]
             ),
+            single_workflow=FakeSingleWorkflow(),
+            max_review_rounds=2,
+            review_only_with_artifacts=False,
+        )
+
+        result = asyncio.run(workflow.run("request", self._session()))
+
+        self.assertEqual(result["review_round"], 2)
+        self.assertEqual(result["review_result"], "needs_changes")
+        self.assertIn("needs_changes", result["output_text"])
+
+    def test_plan_workflow_skips_reviewer_when_max_round_is_one(self) -> None:
+        reviewer = FailIfCalledReviewer()
+        workflow = PlanWorkflow(
+            selector=FakeSelector(mode="plan"),
+            planner=FakePlanner(),
+            developer=FakeDeveloper(),
+            reviewer=reviewer,
             single_workflow=FakeSingleWorkflow(),
             max_review_rounds=1,
             review_only_with_artifacts=False,
@@ -196,9 +215,10 @@ class PlanWorkflowTests(unittest.TestCase):
 
         result = asyncio.run(workflow.run("request", self._session()))
 
-        self.assertEqual(result["review_round"], 1)
-        self.assertEqual(result["review_result"], "needs_changes")
-        self.assertIn("needs_changes", result["output_text"])
+        self.assertEqual(reviewer.calls, 0)
+        self.assertEqual(result["review_round"], 0)
+        self.assertEqual(result["review_result"], "approved")
+        self.assertIn("rounds=0/1", result["output_text"])
 
     def test_plan_workflow_fails_fast_on_prompt_echo(self) -> None:
         echo_executor = EchoCodexExecutor()
@@ -318,7 +338,7 @@ class PlanWorkflowTests(unittest.TestCase):
             developer=LlmDeveloperAgent(executor=executor),
             reviewer=LlmReviewerAgent(executor=executor),
             single_workflow=FakeSingleWorkflow(),
-            max_review_rounds=1,
+            max_review_rounds=2,
             review_only_with_artifacts=False,
         )
         session = self._session()
@@ -417,7 +437,7 @@ class PlanWorkflowTests(unittest.TestCase):
             developer=LlmDeveloperAgent(executor=executor),
             reviewer=LlmReviewerAgent(executor=executor),
             single_workflow=FakeSingleWorkflow(),
-            max_review_rounds=1,
+            max_review_rounds=2,
             review_only_with_artifacts=False,
         )
         session = self._session()
@@ -501,11 +521,10 @@ class PlanWorkflowTests(unittest.TestCase):
 
         asyncio.run(workflow.run("complex request", self._session()))
 
-        self.assertEqual(len(transfers), 4)
+        self.assertEqual(len(transfers), 3)
         self.assertEqual(transfers[0], ("selector", "planner", 0))
         self.assertEqual(transfers[1], ("planner", "developer", 1))
-        self.assertEqual(transfers[2], ("developer", "reviewer", 1))
-        self.assertEqual(transfers[3], ("reviewer", "completed", 1))
+        self.assertEqual(transfers[2], ("developer", "completed", 1))
 
     def test_agent_transfer_callback_plan_mode_needs_changes(self) -> None:
         transfers: list[tuple[str, str, int]] = []
@@ -517,21 +536,28 @@ class PlanWorkflowTests(unittest.TestCase):
             selector=FakeSelector(mode="plan", reason="complex request"),
             planner=FakePlanner(),
             developer=FakeDeveloper(),
-            reviewer=FakeReviewer([ReviewDecision(result="needs_changes", feedback="fix it")]),
+            reviewer=FakeReviewer(
+                [
+                    ReviewDecision(result="needs_changes", feedback="fix it"),
+                    ReviewDecision(result="approved", feedback="ok"),
+                ]
+            ),
             single_workflow=FakeSingleWorkflow(),
-            max_review_rounds=1,
+            max_review_rounds=2,
             review_only_with_artifacts=False,
             on_agent_transfer=capture_transfer,
         )
 
         asyncio.run(workflow.run("complex request", self._session()))
 
-        self.assertEqual(len(transfers), 5)
+        self.assertEqual(len(transfers), 7)
         self.assertEqual(transfers[0], ("selector", "planner", 0))
         self.assertEqual(transfers[1], ("planner", "developer", 1))
         self.assertEqual(transfers[2], ("developer", "reviewer", 1))
         self.assertEqual(transfers[3], ("reviewer", "developer", 1))
-        self.assertEqual(transfers[4], ("developer", "completed", 1))
+        self.assertEqual(transfers[4], ("reviewer", "developer", 2))
+        self.assertEqual(transfers[5], ("developer", "reviewer", 2))
+        self.assertEqual(transfers[6], ("reviewer", "completed", 2))
 
 
 if __name__ == "__main__":

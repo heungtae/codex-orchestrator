@@ -91,6 +91,7 @@ class OpenAIAgentsExecutor:
     cwd: str | None = None
     close_timeout_seconds: float = 2.0
     on_agent_message: Callable[[AgentTextNotification], None] | None = None
+    on_mcp_response: Callable[[str], None] | None = None
     verbose_stdout: bool = False
 
     _startup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
@@ -137,7 +138,7 @@ class OpenAIAgentsExecutor:
             await self._reset_after_transport_error(str(exc))
             raise CodexExecutionError(f"failed to call mcp tool 'codex': {exc}") from exc
 
-        self._print_mcp_response_messages(result)
+        self._emit_mcp_response_messages(result)
         output_text, is_error = self._extract_call_result(result)
         if is_error:
             raise CodexExecutionError(output_text or "codex mcp tool returned error")
@@ -322,8 +323,20 @@ class OpenAIAgentsExecutor:
 
         return "", is_error
 
+    def _emit_mcp_response_messages(self, result: Any) -> None:
+        callback = self.on_mcp_response
+        for line in self._render_mcp_response_messages(result):
+            if callback is None:
+                _stdout_print(line, flush=True)
+                continue
+            try:
+                callback(line)
+            except Exception:
+                pass
+
     @staticmethod
-    def _print_mcp_response_messages(result: Any) -> None:
+    def _render_mcp_response_messages(result: Any) -> list[str]:
+        rendered: list[str] = []
         payload: dict[str, Any]
         if hasattr(result, "model_dump"):
             payload = result.model_dump()
@@ -336,26 +349,21 @@ class OpenAIAgentsExecutor:
                 if isinstance(item, dict):
                     text = item.get("text")
                     if isinstance(text, str) and text.strip():
-                        _stdout_print(f"[codex mcp-response] {text.strip()}", flush=True)
+                        rendered.append(f"[codex mcp-response] {text.strip()}")
                         continue
-                _stdout_print(
-                    f"[codex mcp-response] {json.dumps(item, ensure_ascii=False)}",
-                    flush=True,
-                )
-            return
+                rendered.append(f"[codex mcp-response] {json.dumps(item, ensure_ascii=False)}")
+            return rendered
 
         structured = payload.get("structuredContent") or payload.get("structured_content")
         if isinstance(structured, dict):
             structured_text = structured.get("content")
             if isinstance(structured_text, str) and structured_text.strip():
-                _stdout_print(f"[codex mcp-response] {structured_text.strip()}", flush=True)
-                return
+                rendered.append(f"[codex mcp-response] {structured_text.strip()}")
+                return rendered
 
         if payload:
-            _stdout_print(
-                f"[codex mcp-response] {json.dumps(payload, ensure_ascii=False)}",
-                flush=True,
-            )
+            rendered.append(f"[codex mcp-response] {json.dumps(payload, ensure_ascii=False)}")
+        return rendered
 
     def _emit_agent_notification(self, notification: AgentTextNotification) -> None:
         agent_name = notification.agent_name or "-"
@@ -464,7 +472,7 @@ class OpenAIAgentsExecutor:
         elif msg_type == "agent_message_delta":
             delta = msg.get("delta")
             if not isinstance(delta, str) or not delta:
-                return Nonagents.mcp.MCPServerStdioe
+                return None
             phase_value = msg.get("phase")
             phase = phase_value if isinstance(phase_value, str) and phase_value else "commentary"
             text = delta

@@ -424,116 +424,144 @@ class PlanWorkflow:
         previous_candidate_output: str | None = None
         last_round_feedback: str | None = None
 
-        for round_index in range(1, self.max_review_rounds + 1):
-            if round_index > 1 and last_round_feedback is not None:
-                review_feedback = last_round_feedback
-            from_stage = "planner" if round_index == 1 else "reviewer"
-            self._notify_agent_transfer(from_stage, "developer", round_index)
+        if self.max_review_rounds == 1:
+            self._notify_agent_transfer("planner", "developer", 1)
             stage_transitions.append(
                 {
-                    "from": from_stage,
+                    "from": "planner",
                     "to": "developer",
-                    "round": round_index,
+                    "round": 1,
                     "status": "completed",
                 }
             )
-            before_snapshot = (
-                self._snapshot_workspace(session.profile_working_directory)
-                if self.review_only_with_artifacts
-                else {}
-            )
             candidate_output = await self.developer.develop(
                 user_input=execution_input,
                 session=session,
-                round_index=round_index,
-                review_feedback=review_feedback,
+                round_index=1,
+                review_feedback=None,
             )
-
-            self._notify_agent_transfer("developer", "reviewer", round_index)
-            stage_transitions.append(
-                {
-                    "from": "developer",
-                    "to": "reviewer",
-                    "round": round_index,
-                    "status": "pending",
-                }
-            )
-            artifacts: list[str] = []
-            if self.review_only_with_artifacts:
-                after_snapshot = self._snapshot_workspace(session.profile_working_directory)
-                artifacts = self._detect_artifacts(before_snapshot, after_snapshot)
-            decision = await self.reviewer.review(
-                user_input=execution_input,
-                candidate_output=candidate_output,
-                artifacts=artifacts,
-                session=session,
-                round_index=round_index,
-            )
-            clipped_feedback = self._clip_feedback(decision.feedback)
-            decision = ReviewDecision(result=decision.result, feedback=clipped_feedback)
-            rounds.append(
-                {
-                    "round": round_index,
-                    "result": decision.result,
-                    "feedback": decision.feedback,
-                    "artifacts": artifacts,
-                }
-            )
-            last_decision = decision
-            stage_transitions[-1]["status"] = decision.result
-
-            if decision.result == "approved":
-                if round_index == self.max_review_rounds:
-                    self._notify_agent_transfer("reviewer", "completed", round_index)
-                    stage_transitions.append(
-                        {
-                            "from": "reviewer",
-                            "to": "completed",
-                            "round": round_index,
-                            "status": "approved",
-                        }
-                    )
-                    review_result = "approved"
-                    review_round = round_index
-                    break
-                else:
-                    stage_transitions.append(
-                        {
-                            "from": "reviewer",
-                            "to": "completed",
-                            "round": round_index,
-                            "status": "approved",
-                        }
-                    )
-                    review_result = "approved"
-                    review_round = round_index
-                    break
-
-            self._notify_agent_transfer("reviewer", "developer", round_index)
-            before_snapshot = (
-                self._snapshot_workspace(session.profile_working_directory)
-                if self.review_only_with_artifacts
-                else {}
-            )
-            candidate_output = await self.developer.develop(
-                user_input=execution_input,
-                session=session,
-                round_index=round_index,
-                review_feedback=clipped_feedback,
-            )
+            self._notify_agent_transfer("developer", "completed", 1)
             stage_transitions.append(
                 {
                     "from": "developer",
                     "to": "completed",
-                    "round": round_index,
-                    "status": "needs_changes",
+                    "round": 1,
+                    "status": "approved",
                 }
             )
-            review_result = "needs_changes"
-            review_round = round_index
-            review_feedback = clipped_feedback
-            previous_feedback = clipped_feedback
-            previous_candidate_output = candidate_output.strip()
+            review_result = "approved"
+
+        if self.max_review_rounds > 1:
+            for round_index in range(1, self.max_review_rounds + 1):
+                if round_index > 1 and last_round_feedback is not None:
+                    review_feedback = last_round_feedback
+                from_stage = "planner" if round_index == 1 else "reviewer"
+                self._notify_agent_transfer(from_stage, "developer", round_index)
+                stage_transitions.append(
+                    {
+                        "from": from_stage,
+                        "to": "developer",
+                        "round": round_index,
+                        "status": "completed",
+                    }
+                )
+                before_snapshot = (
+                    self._snapshot_workspace(session.profile_working_directory)
+                    if self.review_only_with_artifacts
+                    else {}
+                )
+                candidate_output = await self.developer.develop(
+                    user_input=execution_input,
+                    session=session,
+                    round_index=round_index,
+                    review_feedback=review_feedback,
+                )
+
+                self._notify_agent_transfer("developer", "reviewer", round_index)
+                stage_transitions.append(
+                    {
+                        "from": "developer",
+                        "to": "reviewer",
+                        "round": round_index,
+                        "status": "pending",
+                    }
+                )
+                artifacts: list[str] = []
+                if self.review_only_with_artifacts:
+                    after_snapshot = self._snapshot_workspace(session.profile_working_directory)
+                    artifacts = self._detect_artifacts(before_snapshot, after_snapshot)
+                decision = await self.reviewer.review(
+                    user_input=execution_input,
+                    candidate_output=candidate_output,
+                    artifacts=artifacts,
+                    session=session,
+                    round_index=round_index,
+                )
+                clipped_feedback = self._clip_feedback(decision.feedback)
+                decision = ReviewDecision(result=decision.result, feedback=clipped_feedback)
+                rounds.append(
+                    {
+                        "round": round_index,
+                        "result": decision.result,
+                        "feedback": decision.feedback,
+                        "artifacts": artifacts,
+                    }
+                )
+                last_decision = decision
+                stage_transitions[-1]["status"] = decision.result
+
+                if decision.result == "approved":
+                    if round_index == self.max_review_rounds:
+                        self._notify_agent_transfer("reviewer", "completed", round_index)
+                        stage_transitions.append(
+                            {
+                                "from": "reviewer",
+                                "to": "completed",
+                                "round": round_index,
+                                "status": "approved",
+                            }
+                        )
+                        review_result = "approved"
+                        review_round = round_index
+                        break
+                    else:
+                        stage_transitions.append(
+                            {
+                                "from": "reviewer",
+                                "to": "completed",
+                                "round": round_index,
+                                "status": "approved",
+                            }
+                        )
+                        review_result = "approved"
+                        review_round = round_index
+                        break
+
+                self._notify_agent_transfer("reviewer", "developer", round_index)
+                before_snapshot = (
+                    self._snapshot_workspace(session.profile_working_directory)
+                    if self.review_only_with_artifacts
+                    else {}
+                )
+                candidate_output = await self.developer.develop(
+                    user_input=execution_input,
+                    session=session,
+                    round_index=round_index,
+                    review_feedback=clipped_feedback,
+                )
+                stage_transitions.append(
+                    {
+                        "from": "developer",
+                        "to": "completed",
+                        "round": round_index,
+                        "status": "needs_changes",
+                    }
+                )
+                review_result = "needs_changes"
+                review_round = round_index
+                review_feedback = clipped_feedback
+                previous_feedback = clipped_feedback
+                previous_candidate_output = candidate_output.strip()
 
         if review_result != "approved" and review_result != "completed":
             self._notify_agent_transfer("developer", "completed", self.max_review_rounds)
