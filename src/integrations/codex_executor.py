@@ -4,7 +4,6 @@ import asyncio
 import builtins
 import json
 import os
-import sys
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -30,42 +29,9 @@ _ACTIVE_CODEX_AGENT_NAME: ContextVar[str | None] = ContextVar(
 )
 
 
-class _FilteredErrLog:
-    def __init__(self, target: Any) -> None:
-        self._target = target
-        self._buffer = ""
-
-    @staticmethod
-    def _should_suppress(line: str) -> bool:
-        lowered = line.lower()
-        return "errors.pydantic.dev" in lowered and "/v/missing" in lowered
-
-    def write(self, text: str) -> int:
-        self._buffer += text
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
-            if not self._should_suppress(line):
-                self._target.write(f"{line}\n")
-        return len(text)
-
-    def flush(self) -> None:
-        if self._buffer:
-            if not self._should_suppress(self._buffer):
-                self._target.write(self._buffer)
-            self._buffer = ""
-        self._target.flush()
-
-    def fileno(self) -> int:
-        return self._target.fileno()
-
-    def isatty(self) -> bool:
-        return bool(self._target.isatty())
-
-
 def _stdout_print(*values: object, **kwargs: Any) -> None:
     file = kwargs.get("file")
-    target = sys.stdout if file is None else file
-    if target is sys.stdout:
+    if file is None:
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         if values:
             normalized_values: list[object] = list(values)
@@ -165,8 +131,6 @@ class CodexMcpExecutor:
         try:
             result = await self._session.call_tool("codex", payload)
         except asyncio.CancelledError:
-            # Ensure transport/session context managers are closed in the same task
-            # where they were entered to avoid AnyIO cancel-scope task affinity errors.
             await self._cleanup_after_cancel()
             self._set_status(stopped=True, error="request cancelled")
             raise
@@ -200,6 +164,8 @@ class CodexMcpExecutor:
             await self.close()
         except Exception:
             self._session = None
+            self._session_cm = None
+            self._stdio_cm = None
             self._started = False
         finally:
             if current_task is not None:
@@ -213,6 +179,8 @@ class CodexMcpExecutor:
             pass
         finally:
             self._session = None
+            self._session_cm = None
+            self._stdio_cm = None
             self._started = False
             self._set_status(stopped=True, error=error_message)
 
@@ -254,7 +222,6 @@ class CodexMcpExecutor:
                 except Exception as exc:
                     stdio_close_error = exc
             self._stdio_cm = None
-
             self._started = False
             self._set_status(stopped=True)
 
@@ -287,7 +254,7 @@ class CodexMcpExecutor:
             stdio_cm = None
             session_cm = None
             try:
-                stdio_cm = stdio_client(params, errlog=_FilteredErrLog(sys.stderr))
+                stdio_cm = stdio_client(params)
                 read_stream, write_stream = await stdio_cm.__aenter__()
 
                 async def _message_handler(message: Any) -> None:
@@ -449,7 +416,6 @@ class CodexMcpExecutor:
         except Exception:
             pass
 
-    @staticmethod
     @staticmethod
     def _extract_notification_from_session_message(message: Any) -> AgentTextNotification | None:
         notification: Any = message
